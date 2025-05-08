@@ -65,7 +65,7 @@ images:
 
 substitutions:
   _REGION: europe-west1
-  _REPOSITORY: meet-organizer
-  _SERVICE_NAME: meet-organizer
+  _REPOSITORY: meetingintern
+  _SERVICE_NAME: meetingintern
   _SERVICE_ACCOUNT: ${_SERVICE_NAME}@${PROJECT_ID}.iam.gserviceaccount.com
   _SERVICE_URL: https://${_SERVICE_NAME}-${PROJECT_ID}.${_REGION}.run.app/ 

@@ -1,4 +1,4 @@
-# Google Meet Recording Organizer
+# MeetingIntern
 
 A powerful tool that automatically organizes your Google Meet transcripts into categorized folders using Google Drive API and Gemini AI. Perfect for teams and individuals who want to maintain a clean and organized meeting archive.
 
@@ -23,8 +23,8 @@ A powerful tool that automatically organizes your Google Meet transcripts into c
 
 1. **Clone the repository**
 ```bash
-git clone https://github.com/yourusername/meetings-organizer.git
-cd meetings-organizer
+git clone https://github.com/clarvo-ai/meetingintern.git
+cd meetingintern
 ```
 
 2. **Install dependencies**
@@ -46,7 +46,7 @@ pip install -r requirements.txt
 4. **Create Service Account**
    - Go to [IAM & Admin > Service Accounts](https://console.cloud.google.com/iam-admin/serviceaccounts)
    - Click "Create Service Account"
-   - Name it "meet-organizer"
+   - Name it "meetingintern"
    - Grant the following roles:
      - Cloud Functions Invoker
      - Cloud Scheduler Admin
@@ -146,7 +146,7 @@ gcloud services enable \
 gcloud builds submit --config cloudbuild.yaml
 
 # Manually test the function (recommended before leaving project running)
-gcloud scheduler jobs run meet-organizer-job --location=[YOUR_CHOSEN_SERVER_LOCATION]
+gcloud scheduler jobs run meetingintern-job --location=[YOUR_CHOSEN_SERVER_LOCATION]
 ```
 
 ### Cloud Build Configuration
@@ -159,13 +159,13 @@ gcloud config set compute/region europe-west1
 
 # Create a new build with custom substitutions
 gcloud builds submit --config cloudbuild.yaml \
-  --substitutions=_REGION=europe-west1,_REPOSITORY=meet-organizer,_SERVICE_NAME=meet-organizer
+  --substitutions=_REGION=europe-west1,_REPOSITORY=meetingintern,_SERVICE_NAME=meetingintern
 ```
 
 The available substitutions are:
 - `_REGION`: The Google Cloud region (default: europe-west1)
-- `_REPOSITORY`: The Artifact Registry repository name (default: meet-organizer)
-- `_SERVICE_NAME`: The Cloud Run service name (default: meet-organizer)
+- `_REPOSITORY`: The Artifact Registry repository name (default: meetingintern)
+- `_SERVICE_NAME`: The Cloud Run service name (default: meetingintern)
 - `_SERVICE_ACCOUNT`: Automatically generated as `${_SERVICE_NAME}@${PROJECT_ID}.iam.gserviceaccount.com`
 - `_SERVICE_URL`: Automatically generated as `https://${_SERVICE_NAME}-${PROJECT_ID}.${_REGION}.run.app/`
 
@@ -173,13 +173,48 @@ To use a different region or service name, you can override these values during 
 
 ```bash
 gcloud builds submit --config cloudbuild.yaml \
-  --substitutions=_REGION=us-central1,_SERVICE_NAME=my-meet-organizer
+  --substitutions=_REGION=us-central1,_SERVICE_NAME=my-meetingintern
 ```
 
-## �� Project Structure
+## 🤝 Contributing
+
+Contributions are welcome! Please feel free to submit a Pull Request.
+
+1. Fork the repository at https://github.com/clarvo-ai/meetingintern
+2. Clone your fork:
+   ```bash
+   git clone https://github.com/YOUR_USERNAME/meetingintern.git
+   cd meetingintern
+   ```
+3. Add the original repository as upstream:
+   ```bash
+   git remote add upstream https://github.com/clarvo-ai/meetingintern.git
+   ```
+4. Create your feature branch:
+   ```bash
+   git checkout -b feature/AmazingFeature
+   ```
+5. Make your changes and commit them:
+   ```bash
+   git commit -m 'Add some AmazingFeature'
+   ```
+6. Push to your fork:
+   ```bash
+   git push origin feature/AmazingFeature
+   ```
+7. Open a Pull Request on GitHub
+
+To keep your fork up to date with the main repository:
+```bash
+git fetch upstream
+git checkout main
+git merge upstream/main
+```
+
+## 📁 Project Structure
 
 ```
-meetings-organizer/
+meetingintern/
 ├── .env                    # Environment configuration
 ├── requirements.txt        # Python dependencies
 ├── Dockerfile             # Container configuration
@@ -239,7 +274,7 @@ self.PROCESSED_PROPERTY = 'meeting_processed'
 The default configuration runs every 2 hours. To modify the schedule:
 
 ```bash
-gcloud scheduler jobs update http meet-organizer-job \
+gcloud scheduler jobs update http meetingintern-job \
   --schedule "YOUR_CRON_SCHEDULE"
 ```
 
@@ -247,23 +282,13 @@ gcloud scheduler jobs update http meet-organizer-job \
 
 - View function logs:
 ```bash
-gcloud logging read "resource.type=cloud_function AND resource.labels.function_name=meet-organizer"
+gcloud logging read "resource.type=cloud_function AND resource.labels.function_name=meetingintern"
 ```
 
 - Check scheduler job status:
 ```bash
-gcloud scheduler jobs get-execution-history meet-organizer-job
+gcloud scheduler jobs get-execution-history meetingintern-job
 ```
-
-## 🤝 Contributing
-
-Contributions are welcome! Please feel free to submit a Pull Request.
-
-1. Fork the repository
-2. Create your feature branch (`git checkout -b feature/AmazingFeature`)
-3. Commit your changes (`git commit -m 'Add some AmazingFeature'`)
-4. Push to the branch (`git push origin feature/AmazingFeature`)
-5. Open a Pull Request
 
 ## 📝 License
 
