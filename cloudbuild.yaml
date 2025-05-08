@@ -1,0 +1,71 @@
+steps:
+  # Build the container image
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['build', '-t', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}', '.']
+
+  # Push the container image to Artifact Registry
+  - name: 'gcr.io/cloud-builders/docker'
+    args: ['push', '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}']
+
+  # Deploy container image to Cloud Run
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'run'
+      - 'deploy'
+      - '${_SERVICE_NAME}'
+      - '--image'
+      - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}'
+      - '--region'
+      - '${_REGION}'
+      - '--platform'
+      - 'managed'
+      - '--service-account'
+      - '${_SERVICE_ACCOUNT}'
+      - '--memory'
+      - '2Gi'
+      - '--cpu'
+      - '1'
+      - '--timeout'
+      - '3600'
+      - '--concurrency'
+      - '80'
+      - '--min-instances'
+      - '1'
+      - '--set-env-vars=GRPC_ENABLE=false'
+      - '--set-env-vars=GOOGLE_API_USE_REST=true'
+      - '--set-env-vars=GOOGLE_API_USE_MTLS=false'
+
+  # Create Cloud Scheduler job
+  - name: 'gcr.io/google.com/cloudsdktool/cloud-sdk'
+    entrypoint: gcloud
+    args:
+      - 'scheduler'
+      - 'jobs'
+      - 'update'
+      - 'http'
+      - '${_SERVICE_NAME}-job'
+      - '--schedule'
+      - '0 */2 * * *'
+      - '--http-method'
+      - 'GET'
+      - '--uri'
+      - '${_SERVICE_URL}'
+      - '--oidc-service-account-email'
+      - '${_SERVICE_ACCOUNT}'
+      - '--oidc-token-audience'
+      - '${_SERVICE_URL}'
+      - '--location'
+      - '${_REGION}'
+      - '--attempt-deadline'
+      - '1800s'  # 30 minutes, maximum allowed
+
+images:
+  - '${_REGION}-docker.pkg.dev/$PROJECT_ID/${_REPOSITORY}/${_SERVICE_NAME}'
+
+substitutions:
+  _REGION: europe-west1
+  _REPOSITORY: meet-organizer
+  _SERVICE_NAME: meet-organizer
+  _SERVICE_ACCOUNT: ${_SERVICE_NAME}@${PROJECT_ID}.iam.gserviceaccount.com
+  _SERVICE_URL: https://${_SERVICE_NAME}-${PROJECT_ID}.${_REGION}.run.app/ 
