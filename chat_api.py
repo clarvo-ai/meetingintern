@@ -41,7 +41,7 @@ class ChatAPI:
             return {'text': message}
 
     def send_daily_meeting_summary(self, meetings):
-        """Send a summary of today's daily meetings to the chat channel."""
+        """Send a summary of today's meetings to the chat channel."""
         try:
             if not meetings:
                 logging.info("No daily meetings to report")
@@ -49,7 +49,7 @@ class ChatAPI:
 
             # Create the message
             today = datetime.now().strftime("%Y-%m-%d")
-            message = f"*Daily Team Meetings Summary for {today}*\n\n"
+            message = f"*Meeting Summary for {today}*\n\n"
             
             for meeting in meetings:
                 # Extract meeting details
@@ -70,7 +70,7 @@ class ChatAPI:
             )
             
             if response.status_code == 200:
-                logging.info(f"Successfully sent daily meetings summary to {self.platform}")
+                logging.info(f"Successfully sent meeting summary to {self.platform}")
                 return True
             else:
                 logging.error(f"Failed to send message to {self.platform}. Status code: {response.status_code}, response: {response.text}")
