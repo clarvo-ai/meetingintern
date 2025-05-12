@@ -18,6 +18,8 @@ A powerful tool that automatically organizes your Google Meet transcripts into c
 - Python 3.13
 - Google Cloud account
 - Google Meet recordings with transcripts enabled
+- Share your and tell your team to share their Google Meet recordings folder with the service account email (format: `meetingintern@[YOUR_PROJECT_ID].iam.gserviceaccount.com`) 
+- Share all destination folders to the MeetingIntern (format: `meetingintern@[YOUR_PROJECT_ID].iam.gserviceaccount.com`) as Content Manager role.
 
 ### Installation
 
