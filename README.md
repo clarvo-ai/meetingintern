@@ -69,7 +69,7 @@ pip install -r requirements.txt
    USERS_TO_PROCESS=user1@domain.com,user2@domain.com
 
    # Optional: Choose Gemini model
-   GEMINI_MODEL=gemini-2.5-flash-lite
+   GEMINI_MODEL=gemini-3.5-flash-lite
 
    # Folder mapping for each meeting category (recommended to keep a "Other" folder for meetings that you dont want confused with others)
    # Your FolderId is: the last part of the drive folder URL ----> "https://drive.google.com/drive/folders/1YourTeamMeetingFolderId"
