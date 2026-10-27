@@ -4,7 +4,8 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from archive_checker import check_once
+from archive_checker import check_once, dispatch_analysis_jobs
+from analysis_state import AnalysisState
 from archive_state import ArchiveState
 from audio_archive import FOLDER_MIME, Meeting
 
@@ -64,6 +65,7 @@ class DispatchTests(unittest.TestCase):
             self.assertIsNone(state.claim_for_work(meeting.source_key))
             state.mark_done(meeting.source_key, "output-doc")
             self.assertFalse(state.reserve_for_dispatch(meeting, "root"))
+            self.assertEqual(state.collection.document(meeting.source_key).data["analysis_status"], "pending")
 
     def test_late_dispatch_error_cannot_release_running_worker(self):
         state = ArchiveState.__new__(ArchiveState)
@@ -94,6 +96,35 @@ class DispatchTests(unittest.TestCase):
                                 launch=launch)
         self.assertEqual(result["dispatched_count"], 1)
         launch.assert_called_once_with("job", "key")
+
+    def test_analysis_claim_blocks_duplicate_dispatch_and_worker(self):
+        state = AnalysisState.__new__(AnalysisState)
+        state.client = FakeClient()
+        state.collection = FakeCollection()
+        ref = state.collection.document("meeting")
+        ref.data.update({"status": "done", "output_doc_id": "transcript",
+                         "analysis_status": "pending"})
+        with patch("analysis_state.firestore.transactional", lambda function: function):
+            self.assertTrue(state.reserve_for_dispatch("meeting"))
+            self.assertFalse(state.reserve_for_dispatch("meeting"))
+            self.assertIsNotNone(state.claim_for_work("meeting"))
+            state.mark_queued("meeting", "execution")
+            self.assertIsNone(state.claim_for_work("meeting"))
+            state.mark_sending("meeting")
+            self.assertFalse(state.reserve_for_dispatch("meeting"))
+            self.assertIsNone(state.claim_for_work("meeting"))
+            state.mark_posted("meeting", "spaces/space/messages/message")
+            self.assertFalse(state.reserve_for_dispatch("meeting"))
+
+    def test_analysis_dispatch_reserves_before_launch(self):
+        state = Mock()
+        state.candidates.return_value = ["meeting-one", "meeting-two"]
+        state.reserve_for_dispatch.side_effect = [True, False]
+        launch = Mock(return_value="execution")
+        dispatched = dispatch_analysis_jobs(state, "job", launch=launch)
+        self.assertEqual(dispatched, ["meeting-one"])
+        launch.assert_called_once_with("job", "meeting-one")
+        state.mark_queued.assert_called_once_with("meeting-one", "execution")
 
 
 if __name__ == "__main__":

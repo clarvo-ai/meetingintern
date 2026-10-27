@@ -10,6 +10,7 @@ from flask import Flask, jsonify
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
 
+from analysis_state import AnalysisState
 from archive_state import ArchiveState
 from audio_archive import (FOLDER_MIME, drive_credentials, find_archived_recordings,
                            find_meetings, list_children)
@@ -20,10 +21,10 @@ app = Flask(__name__)
 logging.basicConfig(level=logging.INFO)
 
 
-def launch_job(job_name, source_key, session=None):
-    """Start one Cloud Run Job execution with a single source key override."""
+def launch_job(job_name, source_key, session=None, env_name="ARCHIVE_STATE_ID"):
+    """Start one Cloud Run Job execution with a single state key override."""
     if not re.fullmatch(r"projects/[^/]+/locations/[^/]+/jobs/[^/]+", job_name):
-        raise ValueError("ARCHIVE_JOB_NAME must be a full Cloud Run Job resource name")
+        raise ValueError("Job name must be a full Cloud Run Job resource name")
     if session is None:
         credentials, _ = google.auth.default(
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
@@ -32,12 +33,35 @@ def launch_job(job_name, source_key, session=None):
     response = session.post(
         f"https://run.googleapis.com/v2/{job_name}:run",
         json={"overrides": {"containerOverrides": [{"env": [
-            {"name": "ARCHIVE_STATE_ID", "value": source_key}
+            {"name": env_name, "value": source_key}
         ]}]}},
         timeout=30,
     )
     response.raise_for_status()
     return response.json().get("name", "")
+
+
+def launch_analysis_job(job_name, source_key):
+    return launch_job(job_name, source_key, env_name="ANALYSIS_STATE_ID")
+
+
+def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
+                           launch=launch_analysis_job):
+    """Dispatch briefs independently from long audio archive work."""
+    dispatched = []
+    for source_key in state.candidates():
+        if len(dispatched) >= dispatch_limit:
+            break
+        if not state.reserve_for_dispatch(source_key):
+            continue
+        try:
+            execution = launch(job_name, source_key)
+            state.mark_queued(source_key, execution)
+            dispatched.append(source_key)
+        except Exception as error:
+            state.mark_retry(source_key, error, "dispatching")
+            LOGGER.exception("Could not launch analysis job for %s", source_key)
+    return dispatched
 
 
 def check_once(roots, destination_folder_id, job_name, state, drive, dispatch_limit=5,
@@ -104,6 +128,13 @@ def check_meetings():
         dispatch_limit=int(os.getenv("ARCHIVE_DISPATCH_LIMIT", "5")),
         not_before=not_before,
     )
+    analysis_job_name = os.getenv("ANALYSIS_JOB_NAME")
+    if analysis_job_name:
+        analysis_state = AnalysisState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
+        result["analysis_dispatched_count"] = len(dispatch_analysis_jobs(
+            analysis_state, analysis_job_name,
+            dispatch_limit=int(os.getenv("ANALYSIS_DISPATCH_LIMIT", "5")),
+        ))
     return jsonify(result)
 
 
