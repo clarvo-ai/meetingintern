@@ -252,7 +252,8 @@ def _ground_customer_sections(brief, inventory):
 
 
 def analyze_transcript(api_key, title, transcript, attendee_hints="",
-                       model="gemini-3.5-flash-lite", evidence=None, roster=None):
+                       model="gemini-3.5-flash-lite", evidence=None, roster=None,
+                       calendar_hints=""):
     """Use a fixed schema so type, topics, and commitments stay distinct."""
     if not transcript.strip():
         raise ValueError("Cannot analyze an empty transcript")
@@ -330,6 +331,8 @@ def analyze_transcript(api_key, title, transcript, attendee_hints="",
         "enough.\n\n"
         f"Meeting title: {title}\n"
         f"Attendee spelling hints (not proof of attendance): {attendee_hints}\n\n"
+        f"Calendar invitee spelling and company hints (invitation is not attendance; "
+        f"never infer speaker identity, role, or meeting type from these): {calendar_hints}\n\n"
         f"Quote-checked evidence inventory:\n{json.dumps(inventory, ensure_ascii=False)}\n\n"
         f"Full English transcript:\n{transcript}"
     )
@@ -382,6 +385,26 @@ def _published_type(payload):
             and (payload.get("meeting_evidence") or {}).get("type_supported") is True)
 
 
+def _event_context_lines(evidence):
+    """Keep scheduled event facts separate from observed meeting attendance."""
+    event = evidence.get("calendar_event") if evidence.get("calendar_match") == "matched" else None
+    if not event:
+        return []
+    lines = ["Calendar event (matched to source files):"]
+    for key, label in (("title", "Title"), ("organizer_email", "Organizer"),
+                       ("start", "Scheduled start"), ("end", "Scheduled end"),
+                       ("event_url", "Event link"), ("meet_url", "Meet link")):
+        if event.get(key):
+            lines.append(f"{label}: {event[key]}")
+    if event.get("invitees"):
+        lines.append("Calendar invitees (responses do not prove attendance): " + "; ".join(
+            (f"{person['name']} <{person['email']}>" if person.get("name") else person["email"])
+            + f" — {person['response_status']}"
+            for person in event["invitees"]
+        ))
+    return lines
+
+
 def format_brief(title, transcript_doc_id, payload):
     """The brief is a separate, editable Doc; the transcript stays untouched."""
     transcript_url = f"https://docs.google.com/document/d/{transcript_doc_id}/edit"
@@ -395,12 +418,20 @@ def format_brief(title, transcript_doc_id, payload):
         header.append(f"Counterparty: {payload['counterparty']}")
     if tags:
         header.append(f"Topic tags: {', '.join('#' + tag.replace('_', '-') for tag in tags)}")
+    header.extend(_event_context_lines(evidence))
+    if evidence.get("confirmed_meet_participants"):
+        header.append("Confirmed Meet participants: " + ", ".join(
+            person.get("email") or person.get("name") or "unknown"
+            for person in evidence["confirmed_meet_participants"]
+        ))
     if evidence.get("speakers"):
-        header.append(f"Speakers labeled in Meet transcript: {', '.join(evidence['speakers'])}")
+        header.append(f"Named transcript speakers: {', '.join(evidence['speakers'])}")
+    if evidence.get("resolved_speakers"):
+        header.append("Unambiguous speaker identities: " + ", ".join(
+            f"{person['speaker']} <{person['email']}>" for person in evidence["resolved_speakers"]
+        ))
     if evidence.get("attendees_in_meet_doc"):
-        header.append(f"Attendees listed in Meet Doc: {', '.join(evidence['attendees_in_meet_doc'])}")
-    if evidence.get("calendar_match") == "matched" and evidence.get("calendar_invitees"):
-        header.append(f"Calendar invitees (attendance unverified): {', '.join(evidence['calendar_invitees'])}")
+        header.append(f"Explicit Meet Doc attendee list: {', '.join(evidence['attendees_in_meet_doc'])}")
     sections = [f"Summary\n{_lines(payload['summary'], 10)}"]
     for key, label, limit in (
         ("customer_needs", "Customer needs and context", 12),
@@ -480,6 +511,35 @@ def format_chat_message(title, transcript_doc_id, brief_doc_id, payload):
     if (_published_type(payload) and payload["meeting_type"] != "team_internal"
             and payload.get("counterparty")):
         lines.append(f"*Counterparty:* {short(payload['counterparty'])}")
+    evidence = payload.get("meeting_evidence") or {}
+    event = evidence.get("calendar_event") if evidence.get("calendar_match") == "matched" else None
+    if event:
+        if event.get("title"):
+            lines.append(f"*Calendar event:* {short(event['title'])}")
+        if event.get("organizer_email"):
+            lines.append(f"*Organizer:* {event['organizer_email']}")
+        if event.get("start"):
+            lines.append(f"*Scheduled:* {event['start']}")
+        if event.get("invitees"):
+            lines.append("*Calendar invitees (attendance unverified):* " + "; ".join(
+                f"{short(person.get('name') or person['email'])} ({person['response_status']})"
+                for person in event["invitees"]
+            ))
+        if event.get("event_url"):
+            lines.append(f"*Event:* {event['event_url']}")
+    if evidence.get("confirmed_meet_participants"):
+        lines.append("*Confirmed Meet participants:* " + ", ".join(
+            short(person.get("email") or person.get("name") or "unknown")
+            for person in evidence["confirmed_meet_participants"]
+        ))
+    if evidence.get("speakers"):
+        lines.append("*Named transcript speakers:* " + ", ".join(
+            short(speaker) for speaker in evidence["speakers"]
+        ))
+    if evidence.get("attendees_in_meet_doc"):
+        lines.append("*Meet Doc attendee list:* " + ", ".join(
+            short(name) for name in evidence["attendees_in_meet_doc"]
+        ))
     lines.extend(["", "*What happened*"])
     lines.extend(f"• {short(item)}" for item in payload["summary"][:5])
     for key, label, limit in (
