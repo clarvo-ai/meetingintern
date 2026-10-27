@@ -8,7 +8,7 @@ from googleapiclient.discovery import build
 
 from archive_state import ArchiveState
 from audio_archive import (AudioGemini, drive_credentials, existing_archive_doc_id,
-                           find_meetings, process_meeting)
+                           find_meetings, find_meetings_across_roots, process_meeting)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -23,16 +23,21 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials):
     try:
         drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
         docs = build("docs", "v1", credentials=credentials, cache_discovery=False)
-        folder_id = data["meeting_folder_id"]
-        folder = drive.files().get(
-            fileId=folder_id, fields="id,name,mimeType", supportsAllDrives=True
-        ).execute()
         # Drive metadata can change the computed key between dispatch and work;
         # the saved Doc IDs still identify the same meeting occurrence.
         source_ids = set(data.get("source_context_doc_ids") or ())
         if data.get("source_notes_id"):
             source_ids.add(data["source_notes_id"])
-        meeting = next((item for item in find_meetings(drive, folder)
+        root_ids = data.get("source_root_ids")
+        if root_ids:
+            meetings = find_meetings_across_roots(drive, root_ids)
+        else:
+            folder = drive.files().get(
+                fileId=data["meeting_folder_id"], fields="id,name,mimeType",
+                supportsAllDrives=True,
+            ).execute()
+            meetings = find_meetings(drive, folder)
+        meeting = next((item for item in meetings
                         if item.source_key == source_key or
                         (source_ids and source_ids.intersection(item.context_doc_ids))), None)
         if not meeting:

@@ -5,11 +5,13 @@
 `audio_archive.py` is a separate path for the newer Google Meet folder layout.
 The checker scans meeting folders under configured personal `Google Meet`
 folders every 15 minutes. It waits until a Meet Doc and an MP4 recording are
-both unchanged for five minutes. If a recording has not appeared one hour after
+both unchanged for five minutes. If a recording has not appeared three hours after
 the Doc's last update, it archives the Meet transcript alone. A visible but
 unfinished recording is allowed to settle before processing. Shortcuts are
 followed only when the service account can read their targets. Recurring
-meeting folders are matched by the meeting timestamp in file names.
+meeting folders are matched by the meeting timestamp in file names. Multiple
+Google Meet roots for one owner can be grouped so a Doc in one root pairs with
+a same-named recording in another root. Roots for different owners stay separate.
 
 The recording's audio is extracted to 15-minute MP3 chunks. Gemini
 `gemini-3.5-flash-lite` checks every audio chunk for non-English speech. For
@@ -36,6 +38,8 @@ Drive access to the source and destination folders, and the Gemini API key.
 Configure the job task timeout for long meetings (for example, 12 hours).
 
 Set `MEETING_SOURCE_FOLDER_IDS` (comma-separated),
+or `MEETING_SOURCE_FOLDER_GROUPS_JSON` (a JSON array of root-ID arrays, one
+array per owner),
 `ARCHIVE_DESTINATION_FOLDER_ID`, `ARCHIVE_JOB_NAME` (full resource name), and
 `ARCHIVE_START_TIME` (ISO timestamp with timezone) on the checker. The start
 time limits automatic discovery to newly created Docs so deployment does not
@@ -414,4 +418,4 @@ If you encounter any issues or have questions, please:
 
 ## 🔄 Updates
 
-This project will most likely not be updated by me, as it is running on autopilot. 
+This project will most likely not be updated by me, as it is running on autopilot.

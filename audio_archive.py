@@ -15,6 +15,7 @@ import subprocess
 import tempfile
 import threading
 import time
+import unicodedata
 from dataclasses import dataclass
 from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
@@ -39,7 +40,7 @@ SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 RECORDING_MIME = "video/mp4"
 CHUNK_SECONDS = 15 * 60
 MAX_DURATION_SECONDS = 8 * 60 * 60
-RECORDING_WAIT = timedelta(hours=1)
+RECORDING_WAIT = timedelta(hours=3)
 SETTLE_WAIT = timedelta(minutes=5)
 
 
@@ -59,6 +60,7 @@ class Meeting:
     notes_id: str
     notes_name: str
     context_doc_ids: tuple[str, ...]
+    recording_folder_id: str | None = None
 
 
 def drive_credentials(impersonate_service_account=None):
@@ -131,26 +133,53 @@ def _meeting_time(name):
     return "".join(match.groups()) if match else None
 
 
-def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=None):
-    """Return ready meetings, preferring a settled recording over Doc fallback.
+def _meeting_stem(name):
+    """Compare Meet artifact names without their type suffix or spacing noise."""
+    name = re.sub(r"\s+-\s+(?:Recording|Transcript|Notes by Gemini)$", "", name, flags=re.I)
+    name = unicodedata.normalize("NFKC", name).casefold()
+    name = re.sub(r"\b(?:eet|eest|gmt[+-]\d+)\b", "", name)
+    return " ".join(re.sub(r"[^\w]+", " ", name).split())
 
-    A Doc without a recording becomes ready one hour after its last update.  A
+
+def _owner_email(item):
+    return next((person.get("emailAddress", "").casefold() for person in item.get("owners", [])
+                 if person.get("emailAddress")), None)
+
+
+def _same_owner(first, second):
+    first_owner, second_owner = _owner_email(first), _owner_email(second)
+    return not first_owner or not second_owner or first_owner == second_owner
+
+
+def find_meetings_in_folders(drive, folders, minimum_age_minutes=5, now=None, not_before=None):
+    """Pair notes and recordings across one owner's shared Meet folders.
+
+    A Doc without a recording becomes ready three hours after its last update. A
     visible but unfinished recording blocks that fallback until it settles.
     """
     now = now or datetime.now(timezone.utc)
     settle_wait = timedelta(minutes=minimum_age_minutes)
-    children = [_resolve_item(drive, item) for item in list_children(drive, folder["id"])]
-    docs = [item for item in children if item and item["mimeType"] == DOC_MIME]
-    recordings = [item for item in children if item and item["mimeType"] == RECORDING_MIME]
+    artifacts = []
+    for folder in folders:
+        for child in list_children(drive, folder["id"]):
+            item = _resolve_item(drive, child)
+            if item and item["mimeType"] in (DOC_MIME, RECORDING_MIME):
+                artifacts.append({**item, "source_folder_id": folder["id"]})
+    docs = [item for item in artifacts if item["mimeType"] == DOC_MIME]
+    recordings = [item for item in artifacts if item["mimeType"] == RECORDING_MIME]
+    doc_counts = {}
+    for doc in docs:
+        folder_id = doc["source_folder_id"]
+        doc_counts[folder_id] = doc_counts.get(folder_id, 0) + 1
     groups = {}
     for doc in docs:
         key = _meeting_time(doc.get("displayName", doc["name"]))
-        if key is None and len(docs) > 2:
+        if key is None and doc_counts[doc["source_folder_id"]] > 2:
             LOGGER.info("Skipping undated Doc %s in a recurring folder", doc["id"])
             continue
-        groups.setdefault(key or "single", []).append(doc)
+        groups.setdefault((doc["source_folder_id"], key or "single"), []).append(doc)
     meetings = []
-    for key, candidates in groups.items():
+    for (notes_folder_id, key), candidates in groups.items():
         candidates.sort(
             key=lambda item: ("Transcript" in item["name"],
                               "Notes by Gemini" in item["name"]),
@@ -168,9 +197,18 @@ def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=Non
         )
         if now - doc_modified < settle_wait:
             continue
+        note_stems = {_meeting_stem(item.get("displayName", item["name"])) for item in candidates}
         matched = [item for item in recordings if
-                   _meeting_time(item.get("displayName", item["name"])) == key]
-        if not matched and len(groups) == len(recordings) == 1:
+                   _meeting_stem(item.get("displayName", item["name"])) in note_stems
+                   and _same_owner(notes, item)]
+        if not matched:
+            matched = [item for item in recordings if
+                       item["source_folder_id"] == notes_folder_id
+                       and _meeting_time(item.get("displayName", item["name"])) == key
+                       and _same_owner(notes, item)]
+        if (not matched and len(groups) == len(recordings) == 1
+                and recordings[0]["source_folder_id"] == notes_folder_id
+                and _same_owner(notes, recordings[0])):
             matched = recordings
         matched.sort(key=lambda item: item.get("createdTime", ""), reverse=True)
         recording = matched[0] if matched else None
@@ -183,13 +221,11 @@ def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=Non
         display_name = (recording.get("displayName", recording["name"]) if recording
                         else notes.get("displayName", notes["name"]))
         meeting_name = re.sub(r"\s+- (?:Recording|Transcript|Notes by Gemini)$", "", display_name)
-        owners = sorted(person.get("emailAddress", "") for person in notes.get("owners", []))
-        owner = next((email for email in owners if email), None)
-        identity = f"{owner}|{key}" if owner and key != "single" else f"doc:{notes['id']}"
+        identity = f"folder:{notes_folder_id}|{key}"
         source_key = hashlib.sha256(identity.encode()).hexdigest()
         meeting = Meeting(
             source_key=source_key,
-            folder_id=folder["id"], folder_name=meeting_name,
+            folder_id=notes_folder_id, folder_name=meeting_name,
             recording_id=recording["id"] if recording else None,
             recording_name=recording["name"] if recording else None,
             duration_seconds=(
@@ -198,12 +234,28 @@ def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=Non
             ),
             notes_id=notes["id"], notes_name=notes["name"],
             context_doc_ids=tuple(item["id"] for item in candidates),
+            recording_folder_id=recording["source_folder_id"] if recording else None,
         )
         if not recording and not export_transcript(drive, meeting):
-            LOGGER.info("Waiting for a transcript or recording in folder %s", folder["id"])
+            LOGGER.info("Waiting for a transcript or recording in folder %s", notes_folder_id)
             continue
         meetings.append(meeting)
     return meetings
+
+
+def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=None):
+    """Keep the single-folder entry point for local archiving and older jobs."""
+    return find_meetings_in_folders(drive, [folder], minimum_age_minutes, now, not_before)
+
+
+def find_meetings_across_roots(drive, root_ids, minimum_age_minutes=5,
+                               now=None, not_before=None):
+    """Discover all immediate meeting subfolders in one configured owner group."""
+    folders = []
+    for root_id in root_ids:
+        folders.extend(item for item in list_children(drive, root_id)
+                       if item["mimeType"] == FOLDER_MIME and item["name"] != "Meet Recordings")
+    return find_meetings_in_folders(drive, folders, minimum_age_minutes, now, not_before)
 
 
 def find_archived_recordings(drive, destination_folder_id):
