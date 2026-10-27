@@ -9,8 +9,9 @@ from googleapiclient.discovery import build
 from analysis_state import AnalysisState
 from audio_archive import drive_credentials
 from meeting_evidence import (archived_speech_body, calendar_client,
-                              calendar_invitees, parse_meet_documents,
-                              parse_team_roster, source_evidence)
+                              calendar_context, parse_meet_documents,
+                              parse_team_roster, resolve_speaker_identities,
+                              source_evidence)
 from meeting_analysis import (analyze_transcript, create_or_find_brief,
                               format_chat_message, post_chat_message,
                               ChatDeliveryRejected, ChatDeliveryUncertain)
@@ -51,10 +52,13 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
             source_ids = [doc_id for doc_id in source_ids if doc_id]
             hints = ""
             evidence = {"speakers": [], "speaker_turns": {}, "attendees_in_meet_doc": [],
-                        "source_speech_words": 0, "source_doc_created_at": None}
-            if notes_id:
+                        "source_speech_words": 0, "source_doc_created_at": None,
+                        "confirmed_meet_participants": [],
+                        "meet_participant_record_status": "unavailable"}
+            if source_ids or data.get("source_recording_id"):
                 try:
-                    evidence = source_evidence(drive, source_ids)
+                    evidence.update(source_evidence(drive, source_ids,
+                                                    data.get("source_recording_id")))
                     hints = ", ".join(dict.fromkeys([
                         *(evidence.get("speakers") or []),
                         *(evidence.get("attendees_in_meet_doc") or []),
@@ -62,13 +66,18 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
                 except Exception:
                     LOGGER.warning("Could not read Meet identity evidence for %s", source_key)
             evidence["archived_speech_words"] = speech["source_speech_words"]
-            evidence.update(calendar_invitees(
-                calendar, calendar_ids, source_ids, evidence.get("source_doc_created_at"),
-            ))
+            evidence.update(calendar_context(calendar, calendar_ids, evidence))
+            evidence.update(resolve_speaker_identities(evidence, roster or {}))
+            event = evidence.get("calendar_event") or {}
+            calendar_hints = ", ".join(
+                f"{person['name']} <{person['email']}>" if person.get("name") else person["email"]
+                for person in event.get("invitees", [])
+            )
             # A filename with names does not establish which person represented which side.
             analysis_title = title if hints else "Meeting recording"
             payload = analyze_transcript(api_key, analysis_title, transcript, hints, model,
-                                         evidence=evidence, roster=roster or {})
+                                         evidence=evidence, roster=roster or {},
+                                         calendar_hints=calendar_hints)
         brief_doc_id = data.get("analysis_brief_doc_id") or create_or_find_brief(
             drive, docs, item["parents"][0], source_key,
             transcript_doc_id, title, payload,

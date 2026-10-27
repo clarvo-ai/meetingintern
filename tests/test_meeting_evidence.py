@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import Mock
 
 from meeting_evidence import (apply_classification_evidence, archived_speech_body,
-                              calendar_invitees, parse_meet_documents, parse_team_roster)
+                              calendar_context, calendar_invitees, parse_meet_documents,
+                              parse_team_roster, resolve_speaker_identities)
 from meeting_analysis import format_brief, format_chat_message
 
 
@@ -108,8 +109,10 @@ class EvidenceTests(unittest.TestCase):
         calendar.events.return_value.list.return_value.execute.return_value = {
             "items": [
                 {"attachments": [{"fileId": "different-doc"}],
+                 "start": {"dateTime": "2026-10-27T10:00:00Z"},
                  "attendees": [{"email": "guest@example.com"}]},
                 {"attachments": [{"fileUrl": "https://docs.google.com/document/d/source-doc/edit"}],
+                 "start": {"dateTime": "2026-10-27T10:00:00Z"},
                  "attendees": [{"email": "robert@clarvo.ai"},
                                {"email": "guest@example.com"},
                                {"email": "room@example.com", "resource": True}]},
@@ -122,6 +125,73 @@ class EvidenceTests(unittest.TestCase):
                          ["guest@example.com", "robert@clarvo.ai"])
         self.assertEqual(calendar.events.return_value.list.call_args.kwargs["calendarId"],
                          "robert@clarvo.ai")
+
+    def test_code_time_and_owner_match_without_shared_folder(self):
+        calendar = Mock()
+        calendar.events.return_value.list.return_value.execute.return_value = {"items": [{
+            "id": "demo", "iCalUID": "demo@example.com",
+            "start": {"dateTime": "2026-10-27T10:00:00+02:00"},
+            "organizer": {"email": "robert@clarvo.ai"},
+            "conferenceData": {"conferenceId": "mow-qtfh-umn"},
+            "attendees": [{"email": "guest@example.com", "responseStatus": "accepted"}],
+        }]}
+        evidence = {"source_artifacts": [
+            {"id": "notes", "meeting_at": "2026-10-27T07:59:00+00:00",
+             "owner_emails": ["robert@clarvo.ai"], "meet_codes": []},
+            {"id": "recording", "meeting_at": "2026-10-27T07:59:00+00:00",
+             "owner_emails": ["robert@clarvo.ai"], "meet_codes": ["mow-qtfh-umn"]},
+        ]}
+        result = calendar_context(calendar, ["robert@clarvo.ai"], evidence)
+        self.assertEqual(result["calendar_match_basis"], "meet_code")
+        self.assertEqual(result["calendar_event"]["invitees"][0]["response_status"], "accepted")
+
+    def test_title_only_or_ambiguous_events_do_not_match(self):
+        calendar = Mock()
+        events = [{
+            "id": "one", "iCalUID": "one@example.com", "summary": "Agenttidemo",
+            "start": {"dateTime": "2026-10-27T10:00:00+02:00"},
+            "organizer": {"email": "robert@clarvo.ai"},
+        }]
+        calendar.events.return_value.list.return_value.execute.return_value = {"items": events}
+        evidence = {"source_artifacts": [{"id": "notes", "meeting_at": "2026-10-27T07:59:00+00:00",
+                                         "owner_emails": ["robert@clarvo.ai"], "meet_codes": []}]}
+        self.assertEqual(calendar_context(calendar, ["robert@clarvo.ai"], evidence)["calendar_match"],
+                         "not_found")
+        events[0]["attachments"] = [{"fileId": "notes"}]
+        events.append({**events[0], "id": "two", "iCalUID": "two@example.com"})
+        self.assertEqual(calendar_context(calendar, ["robert@clarvo.ai"], evidence)["calendar_match"],
+                         "ambiguous")
+
+    def test_speaker_resolution_requires_unique_full_name(self):
+        evidence = {"speakers": ["Robert Holmberg", "Jarkko", "Guest Person"],
+                    "calendar_event": {"invitees": [
+                        {"name": "Robert Holmberg", "email": "robert@clarvo.ai"},
+                        {"name": "Guest Person", "email": "one@example.com"},
+                        {"name": "Guest Person", "email": "two@example.com"},
+                        {"name": "Jarkko Dahlström", "email": "jarkko@example.com"},
+                    ]}}
+        self.assertEqual(resolve_speaker_identities(evidence, ROSTER)["resolved_speakers"],
+                         [{"speaker": "Robert Holmberg", "email": "robert@clarvo.ai"}])
+
+    def test_brief_separates_calendar_invitees_from_speakers(self):
+        evidence = {"calendar_match": "matched", "calendar_event": {
+            "title": "Demo", "organizer_email": "robert@clarvo.ai",
+            "start": "2026-10-27T10:00:00+02:00", "invitees": [
+                {"email": "guest@example.com", "name": None, "response_status": "accepted"},
+            ]}, "speakers": ["Robert Holmberg"],
+            "attendees_in_meet_doc": ["Guest Person"],
+            "confirmed_meet_participants": [],
+            "resolved_speakers": [{"speaker": "Robert Holmberg", "email": "robert@clarvo.ai"}]}
+        payload = {**BASE, "meeting_type": "unknown", "classification_confidence": "low",
+                   "meeting_evidence": evidence}
+        brief = format_brief("Demo", "transcript", payload)
+        chat = format_chat_message("Demo", "transcript", "brief", payload)
+        self.assertIn("Calendar invitees (responses do not prove attendance): guest@example.com — accepted", brief)
+        self.assertIn("Named transcript speakers: Robert Holmberg", brief)
+        self.assertIn("Explicit Meet Doc attendee list: Guest Person", brief)
+        self.assertIn("Unambiguous speaker identities: Robert Holmberg <robert@clarvo.ai>", brief)
+        self.assertIn("Calendar invitees (attendance unverified)", chat)
+        self.assertNotIn("*Type:*", chat)
 
     def test_anonymous_speaker_is_not_proof_of_external_meeting(self):
         evidence = parse_meet_documents([("Demo - Transcript",

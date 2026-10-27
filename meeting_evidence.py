@@ -17,6 +17,12 @@ CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
 TRANSCRIPT_HEADING = re.compile(r"(?im)^.*? - Transcript\s*$")
 SPEAKER_LINE = re.compile(r"^([^:\r\n]{2,70}):[ \t]+(.+)$")
 TIMESTAMP = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$", re.I)
+MEET_CODE = re.compile(r"\b[a-z]{3}-[a-z]{4}-[a-z]{3}\b", re.I)
+SOURCE_TIME = re.compile(
+    r"(20\d{2})[/-](\d{2})[/-](\d{2})\s+(\d{2}):(\d{2})\s*"
+    r"(EEST|EET|GMT[+-]\d{1,2}|UTC[+-]\d{1,2})\b", re.I,
+)
+CODE_TIME_TOLERANCE = timedelta(minutes=90)
 
 
 def parse_team_roster(raw):
@@ -93,37 +99,178 @@ def archived_speech_body(text):
     return text[marker.end():].strip() if marker else text.strip()
 
 
-def source_evidence(drive, doc_ids):
-    """Read all source Docs so a separate Gemini Notes file cannot hide labels."""
+def _source_time(name):
+    """Read the meeting's named start time, not Drive's later upload timestamp."""
+    match = SOURCE_TIME.search(name or "")
+    if not match:
+        return None
+    year, month, day, hour, minute, zone = match.groups()
+    zone = zone.upper()
+    offset = (3 if zone == "EEST" else 2) if zone in ("EEST", "EET") else int(zone[3:])
+    moment = datetime(int(year), int(month), int(day), int(hour), int(minute),
+                      tzinfo=timezone(timedelta(hours=offset)))
+    return moment.astimezone(timezone.utc).isoformat()
+
+
+def _source_artifact(metadata):
+    """Retain ID and owner identity without depending on its Drive parent folder."""
+    name = metadata.get("name", "")
+    urls = re.findall(r"https?://meet\.google\.com/[a-z]{3}-[a-z]{4}-[a-z]{3}",
+                      metadata.get("description", ""), re.I)
+    codes = {match.group().lower() for match in MEET_CODE.finditer(name)}
+    codes.update(match.group().lower() for url in urls for match in MEET_CODE.finditer(url))
+    return {
+        "id": metadata["id"],
+        "name": name,
+        "mime_type": metadata.get("mimeType"),
+        "created_at": metadata.get("createdTime"),
+        "meeting_at": _source_time(name),
+        "owner_emails": sorted({person["emailAddress"].casefold()
+                                for person in metadata.get("owners", [])
+                                if person.get("emailAddress")}),
+        "meet_codes": sorted(codes),
+    }
+
+
+def source_evidence(drive, doc_ids, recording_id=None):
+    """Read source artifact IDs directly so separate Meet folders do not matter."""
     documents = []
     created_at = None
+    artifacts = []
     for doc_id in dict.fromkeys(doc_ids):
         try:
             metadata = drive.files().get(
-                fileId=doc_id, fields="id,name,createdTime", supportsAllDrives=True,
+                fileId=doc_id,
+                fields="id,name,mimeType,createdTime,owners(emailAddress),description",
+                supportsAllDrives=True,
             ).execute()
             created_at = created_at or metadata.get("createdTime")
+            artifacts.append(_source_artifact(metadata))
             raw = drive.files().export(fileId=doc_id, mimeType="text/plain").execute()
             documents.append((metadata["name"], raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw))
         except HttpError as error:
             if error.resp.status not in (403, 404):
                 raise
             LOGGER.info("Meet source Doc %s is no longer readable: HTTP %s", doc_id, error.resp.status)
+    if recording_id:
+        try:
+            metadata = drive.files().get(
+                fileId=recording_id,
+                fields="id,name,mimeType,createdTime,owners(emailAddress),description",
+                supportsAllDrives=True,
+            ).execute()
+            artifacts.append(_source_artifact(metadata))
+        except HttpError as error:
+            if error.resp.status not in (403, 404):
+                raise
+            LOGGER.info("Meet recording %s is no longer readable: HTTP %s",
+                        recording_id, error.resp.status)
     evidence = parse_meet_documents(documents)
     evidence["source_doc_created_at"] = created_at
+    evidence["source_artifacts"] = artifacts
     return evidence
 
 
-def calendar_invitees(calendar, calendar_ids, doc_ids, created_at):
-    """Match only exact Meet attachment IDs; a similar title is insufficient."""
-    if not calendar or not calendar_ids or not created_at:
-        return {"calendar_match": "unavailable", "calendar_invitees": []}
-    created = datetime.fromisoformat(created_at.replace("Z", "+00:00"))
-    start = (created - timedelta(days=1)).astimezone(timezone.utc).isoformat()
-    end = (created + timedelta(days=1)).astimezone(timezone.utc).isoformat()
-    expected = set(doc_ids)
-    invitees = set()
-    matched = False
+def _event_time(event):
+    raw = event.get("start", {}).get("dateTime")
+    return datetime.fromisoformat(raw.replace("Z", "+00:00")) if raw else None
+
+
+def _event_code(event):
+    code = event.get("conferenceData", {}).get("conferenceId", "").lower()
+    if MEET_CODE.fullmatch(code):
+        return code
+    for value in [event.get("hangoutLink", ""),
+                  *(item.get("uri", "") for item in event.get("conferenceData", {}).get("entryPoints", []))]:
+        match = MEET_CODE.search(urlparse(value).path)
+        if match:
+            return match.group().lower()
+    return None
+
+
+def _attachment_ids(event):
+    ids = set()
+    for item in event.get("attachments", []):
+        if item.get("fileId"):
+            ids.add(item["fileId"])
+        match = re.search(r"/d/([^/]+)", urlparse(item.get("fileUrl", "")).path)
+        if match:
+            ids.add(match.group(1))
+    return ids
+
+
+def _event_identity(event):
+    """Copies on multiple invitee calendars are one event, not ambiguity."""
+    return (event.get("iCalUID") or event.get("id"),
+            event.get("organizer", {}).get("email", "").casefold(),
+            event.get("start", {}).get("dateTime"))
+
+
+def _calendar_event_details(event):
+    attendees = sorted(
+        ({"email": item["email"].casefold(),
+          "name": item.get("displayName"),
+          "response_status": item.get("responseStatus", "unknown")}
+         for item in event.get("attendees", [])
+         if item.get("email") and not item.get("resource")),
+        key=lambda item: item["email"],
+    )
+    organizer = event.get("organizer", {}).get("email", "").casefold() or None
+    meet_url = event.get("hangoutLink") or next(
+        (item.get("uri") for item in event.get("conferenceData", {}).get("entryPoints", [])
+         if item.get("entryPointType") == "video"), None,
+    )
+    return {
+        "id": event.get("id"),
+        "title": event.get("summary"),
+        "organizer_email": organizer,
+        "start": event.get("start", {}).get("dateTime"),
+        "end": event.get("end", {}).get("dateTime"),
+        "time_zone": event.get("start", {}).get("timeZone"),
+        "event_url": event.get("htmlLink"),
+        "meet_url": meet_url,
+        "meet_code": _event_code(event),
+        "invitees": attendees,
+    }
+
+
+def resolve_speaker_identities(evidence, roster):
+    """Link a transcript label only to a unique full name from known identities."""
+    people = {}
+    for email, name in roster.items():
+        people.setdefault(_name_key(name), set()).add(email.casefold())
+    event = evidence.get("calendar_event") or {}
+    for invitee in event.get("invitees", []):
+        if invitee.get("name"):
+            people.setdefault(_name_key(invitee["name"]), set()).add(invitee["email"])
+    resolved = []
+    for speaker in evidence.get("speakers", []):
+        emails = people.get(_name_key(speaker), set())
+        if len(emails) == 1:
+            resolved.append({"speaker": speaker, "email": next(iter(emails))})
+    return {"resolved_speakers": resolved}
+
+
+def calendar_context(calendar, calendar_ids, evidence):
+    """Match source artifact IDs first, then exact Meet code, time, and owner."""
+    empty = {"calendar_match": "unavailable", "calendar_match_basis": None,
+             "calendar_event": None, "calendar_invitees": []}
+    if not calendar or not calendar_ids:
+        return empty
+    artifacts = evidence.get("source_artifacts") or []
+    source_ids = {item["id"] for item in artifacts}
+    source_codes = {code for item in artifacts for code in item.get("meet_codes", [])}
+    source_owners = {email for item in artifacts for email in item.get("owner_emails", [])}
+    source_times = [datetime.fromisoformat(item["meeting_at"])
+                    for item in artifacts if item.get("meeting_at")]
+    anchor = source_times[0] if source_times else None
+    if not anchor and evidence.get("source_doc_created_at"):
+        anchor = datetime.fromisoformat(evidence["source_doc_created_at"].replace("Z", "+00:00"))
+    if not anchor:
+        return empty
+    start = (anchor - timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    end = (anchor + timedelta(days=1)).astimezone(timezone.utc).isoformat()
+    events = {}
     accessible = False
     unavailable = False
     for calendar_id in calendar_ids:
@@ -133,25 +280,21 @@ def calendar_invitees(calendar, calendar_ids, doc_ids, created_at):
                 page = calendar.events().list(
                     calendarId=calendar_id, timeMin=start, timeMax=end,
                     singleEvents=True, maxResults=250, pageToken=page_token,
-                    fields="nextPageToken,items(id,attachments(fileId,fileUrl),attendees(email,resource),organizer(email))",
+                    fields=("nextPageToken,items(id,iCalUID,status,summary,start,end,"
+                            "organizer(email),htmlLink,hangoutLink,"
+                            "conferenceData(conferenceId,entryPoints(entryPointType,uri)),"
+                            "attachments(fileId,fileUrl),"
+                            "attendees(email,displayName,responseStatus,resource))"),
                 ).execute()
                 accessible = True
                 for event in page.get("items", []):
-                    ids = set()
-                    for item in event.get("attachments", []):
-                        if item.get("fileId"):
-                            ids.add(item["fileId"])
-                        path = urlparse(item.get("fileUrl", "")).path
-                        match = re.search(r"/d/([^/]+)", path)
-                        if match:
-                            ids.add(match.group(1))
-                    if not expected.intersection(ids):
+                    if event.get("status") == "cancelled" or not _event_time(event):
                         continue
-                    matched = True
-                    invitees.update(item["email"].casefold() for item in event.get("attendees", [])
-                                    if item.get("email") and not item.get("resource"))
-                    if event.get("organizer", {}).get("email"):
-                        invitees.add(event["organizer"]["email"].casefold())
+                    identity = _event_identity(event)
+                    previous = events.get(identity)
+                    if not previous or (len(event.get("attendees", [])) + len(event.get("attachments", []))
+                                        > len(previous.get("attendees", [])) + len(previous.get("attachments", []))):
+                        events[identity] = event
                 page_token = page.get("nextPageToken")
                 if not page_token:
                     break
@@ -161,10 +304,34 @@ def calendar_invitees(calendar, calendar_ids, doc_ids, created_at):
             unavailable = True
             LOGGER.info("Calendar %s is unavailable for meeting evidence: HTTP %s",
                         calendar_id, error.resp.status)
+    attachments = [event for event in events.values()
+                   if source_ids.intersection(_attachment_ids(event))]
+    basis = "attachment" if attachments else "meet_code"
+    candidates = attachments or [
+        event for event in events.values()
+        if (_event_code(event) in source_codes
+            and event.get("organizer", {}).get("email", "").casefold() in source_owners
+            and any(abs(_event_time(event) - moment) <= CODE_TIME_TOLERANCE
+                    for moment in source_times))
+    ]
+    if len(candidates) > 1:
+        return {**empty, "calendar_match": "ambiguous"}
+    if not candidates:
+        return {**empty, "calendar_match": "unavailable" if unavailable or not accessible else "not_found"}
+    details = _calendar_event_details(candidates[0])
     return {
-        "calendar_match": "matched" if matched else "unavailable" if unavailable or not accessible else "not_found",
-        "calendar_invitees": sorted(invitees),
+        "calendar_match": "matched", "calendar_match_basis": basis,
+        "calendar_event": details,
+        "calendar_invitees": [item["email"] for item in details["invitees"]],
     }
+
+
+def calendar_invitees(calendar, calendar_ids, doc_ids, created_at):
+    """Compatibility entry point for callers that only know source Doc IDs."""
+    return calendar_context(calendar, calendar_ids, {
+        "source_doc_created_at": created_at,
+        "source_artifacts": [{"id": doc_id} for doc_id in doc_ids],
+    })
 
 
 def calendar_client(calendar_ids):
