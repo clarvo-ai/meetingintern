@@ -27,8 +27,14 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials):
         folder = drive.files().get(
             fileId=folder_id, fields="id,name,mimeType", supportsAllDrives=True
         ).execute()
+        # Drive metadata can change the computed key between dispatch and work;
+        # the saved Doc IDs still identify the same meeting occurrence.
+        source_ids = set(data.get("source_context_doc_ids") or ())
+        if data.get("source_notes_id"):
+            source_ids.add(data["source_notes_id"])
         meeting = next((item for item in find_meetings(drive, folder)
-                        if item.source_key == source_key), None)
+                        if item.source_key == source_key or
+                        (source_ids and source_ids.intersection(item.context_doc_ids))), None)
         if not meeting:
             state.mark_retry(source_key, "Source files are no longer settled or accessible", "processing")
             return None
