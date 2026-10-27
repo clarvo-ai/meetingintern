@@ -12,6 +12,7 @@ from pydantic import BaseModel
 import requests
 
 from audio_archive import DOC_MIME
+from meeting_evidence import apply_classification_evidence
 
 
 LOGGER = logging.getLogger(__name__)
@@ -108,7 +109,7 @@ def _review_agreed_actions(client, model, brief):
 
 
 def analyze_transcript(api_key, title, transcript, attendee_hints="",
-                       model="gemini-3.5-flash-lite"):
+                       model="gemini-3.5-flash-lite", evidence=None, roster=None):
     """Use a fixed schema so type, topics, and commitments stay distinct."""
     if not transcript.strip():
         raise ValueError("Cannot analyze an empty transcript")
@@ -154,7 +155,7 @@ def analyze_transcript(api_key, title, transcript, attendee_hints="",
     if brief.meeting_type == "unknown":
         brief.classification_confidence = "low"
     brief = _review_agreed_actions(client, model, brief)
-    return brief.model_dump()
+    return apply_classification_evidence(brief.model_dump(), evidence or {}, roster or {})
 
 
 def _lines(items, limit=8):
@@ -176,16 +177,33 @@ def _action_lines(actions):
     return "\n".join(lines) or "None recorded"
 
 
+def _published_type(payload):
+    """A saved Gemini confidence alone can never publish a meeting type."""
+    return (payload["meeting_type"] != "unknown"
+            and payload["classification_confidence"] == "high"
+            and (payload.get("meeting_evidence") or {}).get("type_supported") is True)
+
+
 def format_brief(title, transcript_doc_id, payload):
     """The brief is a separate, editable Doc; the transcript stays untouched."""
     transcript_url = f"https://docs.google.com/document/d/{transcript_doc_id}/edit"
-    return (
-        f"{title} - Meeting Brief\n\n"
-        f"Full English transcript: {transcript_url}\n"
-        f"Meeting type: {TYPE_LABELS[payload['meeting_type']]} "
-        f"(confidence: {payload['classification_confidence']})\n"
-        f"Counterparty: {payload.get('counterparty') or 'Not established'}\n"
-        f"Topic tags: {', '.join('#' + tag.replace('_', '-') for tag in payload['topic_tags']) or 'none'}\n\n"
+    show_type = _published_type(payload)
+    tags = [tag for tag in payload["topic_tags"] if tag != "other"]
+    evidence = payload.get("meeting_evidence") or {}
+    header = [f"{title} - Meeting Brief", "", f"Full English transcript: {transcript_url}"]
+    if show_type:
+        header.append(f"Meeting type: {TYPE_LABELS[payload['meeting_type']]}")
+    if show_type and payload["meeting_type"] != "team_internal" and payload.get("counterparty"):
+        header.append(f"Counterparty: {payload['counterparty']}")
+    if tags:
+        header.append(f"Topic tags: {', '.join('#' + tag.replace('_', '-') for tag in tags)}")
+    if evidence.get("speakers"):
+        header.append(f"Speakers labeled in Meet transcript: {', '.join(evidence['speakers'])}")
+    if evidence.get("attendees_in_meet_doc"):
+        header.append(f"Attendees listed in Meet Doc: {', '.join(evidence['attendees_in_meet_doc'])}")
+    if evidence.get("calendar_match") == "matched" and evidence.get("calendar_invitees"):
+        header.append(f"Calendar invitees (attendance unverified): {', '.join(evidence['calendar_invitees'])}")
+    return "\n".join(header) + "\n\n" + (
         f"Summary\n{_lines(payload['summary'], 6)}\n\n"
         f"Decisions\n{_lines(payload['decisions'])}\n\n"
         f"Agreed actions\n{_action_lines(payload['agreed_actions'])}\n\n"
@@ -245,13 +263,14 @@ def format_chat_message(title, transcript_doc_id, brief_doc_id, payload):
     def short(item):
         return re.sub(r"\s+", " ", str(item).strip())[:450]
 
-    lines = [
-        f"*{short(title)}*",
-        f"*Type:* {TYPE_LABELS[payload['meeting_type']]} "
-        f"({payload['classification_confidence']} confidence)",
-        f"*Topics:* {', '.join('#' + tag.replace('_', '-') for tag in payload['topic_tags']) or 'none'}",
-    ]
-    if payload.get("counterparty"):
+    lines = [f"*{short(title)}*"]
+    if _published_type(payload):
+        lines.append(f"*Type:* {TYPE_LABELS[payload['meeting_type']]}")
+    tags = [tag for tag in payload["topic_tags"] if tag != "other"]
+    if tags:
+        lines.append(f"*Topics:* {', '.join('#' + tag.replace('_', '-') for tag in tags)}")
+    if (_published_type(payload) and payload["meeting_type"] != "team_internal"
+            and payload.get("counterparty")):
         lines.append(f"*Counterparty:* {short(payload['counterparty'])}")
     lines.extend(["", "*What happened*"])
     lines.extend(f"• {short(item)}" for item in payload["summary"][:3])

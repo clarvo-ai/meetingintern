@@ -150,6 +150,18 @@ class DispatchTests(unittest.TestCase):
         launch.assert_called_once_with("job", "meeting-one")
         state.mark_queued.assert_called_once_with("meeting-one", "execution")
 
+    def test_empty_analysis_source_cannot_be_dispatched_again(self):
+        state = AnalysisState.__new__(AnalysisState)
+        state.client = FakeClient()
+        state.collection = FakeCollection()
+        ref = state.collection.document("empty-meeting")
+        ref.data.update({"status": "done", "output_doc_id": "empty-doc",
+                         "analysis_status": "processing"})
+        with patch("analysis_state.firestore.transactional", lambda function: function):
+            state.mark_invalid_source("empty-meeting", "No spoken words")
+            self.assertEqual(ref.data["analysis_status"], "invalid_source")
+            self.assertFalse(state.reserve_for_dispatch("empty-meeting"))
+
 
 if __name__ == "__main__":
     unittest.main()

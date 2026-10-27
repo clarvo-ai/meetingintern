@@ -66,10 +66,40 @@ held for manual reconciliation rather than retried into a possible duplicate.
 Customer demo search links and the representative's own feedback are outside
 this increment.
 
+The analysis job reads speaker labels and any explicit `Attendees` section from
+the original Meet Doc. It never treats names or emails mentioned in Gemini
+notes as proof of attendance. The current team roster is supplied as
+`MEETING_TEAM_ROSTER_JSON`, a JSON array of `{"name":"Full Name","email":"name@clarvo.ai"}`
+objects. For the current team, set it to Juha Lehto, Robert Holmberg, Mark
+Szucs, and Miro Keimiöniemi with their `@clarvo.ai` emails. Keep the roster
+current when team membership changes. With no roster, it safely omits meeting types. A team meeting needs
+substantial speech, at least two distinct rostered speakers, and no observed
+outside speaker, Meet Doc attendee, or Calendar invitee. Other types need high
+model confidence and a named outside speaker or Meet Doc attendee; an invitee
+alone cannot establish who joined. The Chat update and brief
+omit uncertain types and the `other` topic tag; the brief identifies speaker
+labels and Calendar invitees separately.
+
+`MEETING_CALENDAR_IDS` is an optional comma-separated list of calendars readable
+by the analysis job's service account. Calendar events are matched by exact
+Meet Doc attachment ID within a one-day window, never by a similar title.
+Invitees are not proof of attendance. The code requests a Calendar read-only
+OAuth scope; enable the Calendar API and give the job's service account event
+read access to each calendar before enabling this variable. Calendar
+permission failures leave meeting types conservative and do not stop summaries.
+Actual Meet joiner records are not integrated yet.
+
+Current roster value:
+
+```json
+[{"name":"Juha Lehto","email":"juha@clarvo.ai"},{"name":"Robert Holmberg","email":"robert@clarvo.ai"},{"name":"Mark Szucs","email":"mark@clarvo.ai"},{"name":"Miro Keimiöniemi","email":"miro@clarvo.ai"}]
+```
+
 Build the third image from `Dockerfile.analysis` with `cloudbuild.archive.yaml`.
 Set `ANALYSIS_JOB_NAME` (full Cloud Run Job resource name) on the checker. Set
 `GOOGLE_AI_API_KEY`, `MEETING_ARCHIVE_CHAT_WEBHOOK`, and
-`MEETING_CHAT_SPACE_ID` on the analysis job. The webhook must belong to that
+`MEETING_CHAT_SPACE_ID` and `MEETING_TEAM_ROSTER_JSON` on the analysis job. The
+webhook must belong to that
 space; the job rejects a webhook for another space. The existing organizer's
 General-channel webhook is not used by this flow.
 

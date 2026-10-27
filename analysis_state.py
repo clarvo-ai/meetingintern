@@ -112,6 +112,26 @@ class AnalysisState:
             "analysis_updated_at": _now(),
         })
 
+    def mark_invalid_source(self, source_key, reason):
+        """Permanently suppress a brief when the archived Doc has no speech."""
+        ref = self.collection.document(source_key)
+        now = _now()
+
+        @firestore.transactional
+        def invalidate(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if snapshot.exists and snapshot.to_dict().get("analysis_status") == "processing":
+                transaction.update(ref, {
+                    "analysis_status": "invalid_source",
+                    "analysis_meeting_type": "unknown",
+                    "analysis_topic_tags": [],
+                    "analysis_invalid_reason": reason,
+                    "analysis_lease_until": now,
+                    "analysis_updated_at": now,
+                })
+
+        invalidate(self.client.transaction())
+
     def mark_sending(self, source_key):
         """Fence off automatic retries before a non-idempotent webhook call."""
         ref = self.collection.document(source_key)

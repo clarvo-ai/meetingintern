@@ -10,6 +10,7 @@ from analysis_job import work_once
 BRIEF = {
     "meeting_type": "team_internal",
     "classification_confidence": "high",
+    "meeting_evidence": {"type_supported": True, "speakers": ["Juha Lehto", "Robert Holmberg"]},
     "counterparty": None,
     "topic_tags": ["sales", "product_development"],
     "summary": ["The team reviewed the launch plan."],
@@ -40,6 +41,12 @@ class BriefTests(unittest.TestCase):
                     "MEETINGS", "source-key", "brief text",
                 )
         post.assert_not_called()
+
+    def test_legacy_high_confidence_without_evidence_does_not_show_type(self):
+        payload = {**BRIEF, "meeting_evidence": None, "topic_tags": ["other"]}
+        text = format_chat_message("Unknown meeting", "source", "brief", payload)
+        self.assertNotIn("*Type:*", text)
+        self.assertNotIn("*Topics:*", text)
 
     def test_webhook_posts_without_unsupported_request_id(self):
         response = Mock(status_code=200)
@@ -92,6 +99,26 @@ class BriefTests(unittest.TestCase):
                 work_once("source-key", state, drive, Mock(), "key", "webhook", "MEETINGS")
         state.mark_delivery_unknown.assert_called_once()
         state.mark_retry.assert_called_once_with("source-key", unittest.mock.ANY, "processing")
+
+    def test_worker_skips_archived_doc_without_spoken_words(self):
+        state = Mock()
+        state.claim_for_work.return_value = {"output_doc_id": "transcript"}
+        drive = Mock()
+        drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "transcript", "name": "Demo - English Transcript",
+            "parents": ["shared-folder"],
+        }
+        drive.files.return_value.export.return_value.execute.return_value = (
+            b"Demo - English Transcript\nMethod: Meet transcript\n\n"
+            b"Demo - Transcript\nTranscription ended after 00:00:09\n"
+        )
+        with patch("analysis_job.analyze_transcript") as analyze, \
+             patch("analysis_job.post_chat_message") as post:
+            result = work_once("source-key", state, drive, Mock(), "key", "webhook", "MEETINGS")
+        self.assertIsNone(result)
+        state.mark_invalid_source.assert_called_once()
+        analyze.assert_not_called()
+        post.assert_not_called()
 
 
 if __name__ == "__main__":
