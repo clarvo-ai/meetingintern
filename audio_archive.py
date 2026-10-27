@@ -7,6 +7,7 @@ the source files.  The same flow runs locally or as a Cloud Run Job.
 
 import argparse
 from contextlib import contextmanager
+import hashlib
 import logging
 import os
 import re
@@ -15,7 +16,7 @@ import tempfile
 import threading
 import time
 from dataclasses import dataclass
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
@@ -38,6 +39,8 @@ SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 RECORDING_MIME = "video/mp4"
 CHUNK_SECONDS = 15 * 60
 MAX_DURATION_SECONDS = 8 * 60 * 60
+RECORDING_WAIT = timedelta(hours=1)
+SETTLE_WAIT = timedelta(minutes=5)
 
 
 def duration_exceeds_limit(seconds):
@@ -47,13 +50,15 @@ def duration_exceeds_limit(seconds):
 
 @dataclass(frozen=True)
 class Meeting:
+    source_key: str
     folder_id: str
     folder_name: str
-    recording_id: str
-    recording_name: str
+    recording_id: str | None
+    recording_name: str | None
     duration_seconds: float | None
     notes_id: str
     notes_name: str
+    context_doc_ids: tuple[str, ...]
 
 
 def drive_credentials(impersonate_service_account=None):
@@ -88,7 +93,7 @@ def list_children(drive, folder_id):
     while True:
         response = drive.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,shortcutDetails,videoMediaMetadata(durationMillis))",
+            fields="nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,owners(emailAddress),shortcutDetails,videoMediaMetadata(durationMillis))",
             pageSize=1000,
             pageToken=page_token,
             supportsAllDrives=True,
@@ -109,7 +114,7 @@ def _resolve_item(drive, item):
     try:
         resolved = drive.files().get(
             fileId=target["targetId"],
-            fields="id,name,mimeType,size,createdTime,modifiedTime,videoMediaMetadata(durationMillis)",
+            fields="id,name,mimeType,size,createdTime,modifiedTime,owners(emailAddress),videoMediaMetadata(durationMillis)",
             supportsAllDrives=True,
         ).execute()
         resolved["displayName"] = item["name"]
@@ -122,54 +127,83 @@ def _resolve_item(drive, item):
 
 
 def _meeting_time(name):
-    match = re.search(r"20\d\d/\d\d/\d\d \d\d:\d\d", name)
-    return match.group(0) if match else None
+    match = re.search(r"(20\d\d)[/-](\d\d)[/-](\d\d) (\d\d):(\d\d)", name)
+    return "".join(match.groups()) if match else None
 
 
-def find_meetings(drive, folder, minimum_age_minutes=5):
-    """Match files by Meet's timestamp, including recurring-folder shortcuts."""
+def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=None):
+    """Return ready meetings, preferring a settled recording over Doc fallback.
+
+    A Doc without a recording becomes ready one hour after its last update.  A
+    visible but unfinished recording blocks that fallback until it settles.
+    """
+    now = now or datetime.now(timezone.utc)
+    settle_wait = timedelta(minutes=minimum_age_minutes)
     children = [_resolve_item(drive, item) for item in list_children(drive, folder["id"])]
     docs = [item for item in children if item and item["mimeType"] == DOC_MIME]
     recordings = [item for item in children if item and item["mimeType"] == RECORDING_MIME]
-    recordings.sort(key=lambda item: item.get("createdTime", ""), reverse=True)
-    meetings = []
-    for recording in recordings:
-        recording_time = _meeting_time(recording.get("displayName", recording["name"]))
-        candidates = [doc for doc in docs if recording_time and
-                      _meeting_time(doc.get("displayName", doc["name"])) == recording_time]
-        if not candidates and len(recordings) == len(docs) == 1:
-            candidates = docs
-        if not candidates:
-            LOGGER.info("No matching transcript for recording %s yet", recording["id"])
+    groups = {}
+    for doc in docs:
+        key = _meeting_time(doc.get("displayName", doc["name"]))
+        if key is None and len(docs) > 2:
+            LOGGER.info("Skipping undated Doc %s in a recurring folder", doc["id"])
             continue
+        groups.setdefault(key or "single", []).append(doc)
+    meetings = []
+    for key, candidates in groups.items():
         candidates.sort(
             key=lambda item: ("Transcript" in item["name"],
                               "Notes by Gemini" in item["name"]),
             reverse=True,
         )
         notes = candidates[0]
-        last_changed = max(
-            datetime.fromisoformat(item["modifiedTime"].replace("Z", "+00:00"))
-            for item in (recording, notes)
-        )
-        if (datetime.now(timezone.utc) - last_changed).total_seconds() < minimum_age_minutes * 60:
+        if not_before and all(
+            datetime.fromisoformat(item["createdTime"].replace("Z", "+00:00")) < not_before
+            for item in candidates
+        ):
             continue
-        display_name = recording.get("displayName", recording["name"])
-        meeting_name = re.sub(r"\s+- Recording$", "", display_name)
+        doc_modified = max(
+            datetime.fromisoformat(item["modifiedTime"].replace("Z", "+00:00"))
+            for item in candidates
+        )
+        if now - doc_modified < settle_wait:
+            continue
+        matched = [item for item in recordings if
+                   _meeting_time(item.get("displayName", item["name"])) == key]
+        if not matched and len(groups) == len(recordings) == 1:
+            matched = recordings
+        matched.sort(key=lambda item: item.get("createdTime", ""), reverse=True)
+        recording = matched[0] if matched else None
+        if recording:
+            video_modified = datetime.fromisoformat(recording["modifiedTime"].replace("Z", "+00:00"))
+            if now - video_modified < settle_wait:
+                continue
+        elif now - doc_modified < RECORDING_WAIT:
+            continue
+        display_name = (recording.get("displayName", recording["name"]) if recording
+                        else notes.get("displayName", notes["name"]))
+        meeting_name = re.sub(r"\s+- (?:Recording|Transcript|Notes by Gemini)$", "", display_name)
+        owners = sorted(person.get("emailAddress", "") for person in notes.get("owners", []))
+        owner = next((email for email in owners if email), None)
+        identity = f"{owner}|{key}" if owner and key != "single" else f"doc:{notes['id']}"
+        source_key = hashlib.sha256(identity.encode()).hexdigest()
         meetings.append(Meeting(
+            source_key=source_key,
             folder_id=folder["id"], folder_name=meeting_name,
-            recording_id=recording["id"], recording_name=recording["name"],
+            recording_id=recording["id"] if recording else None,
+            recording_name=recording["name"] if recording else None,
             duration_seconds=(
                 int(recording["videoMediaMetadata"]["durationMillis"]) / 1000
-                if recording.get("videoMediaMetadata", {}).get("durationMillis") else None
+                if recording and recording.get("videoMediaMetadata", {}).get("durationMillis") else None
             ),
             notes_id=notes["id"], notes_name=notes["name"],
+            context_doc_ids=tuple(item["id"] for item in candidates),
         ))
     return meetings
 
 
 def find_archived_recordings(drive, destination_folder_id):
-    """Use the destination file property as the durable duplicate marker."""
+    """Accept old recording markers and new source keys for safe retries."""
     ids = set()
     page_token = None
     while True:
@@ -182,12 +216,33 @@ def find_archived_recordings(drive, destination_folder_id):
             includeItemsFromAllDrives=True,
         ).execute()
         for item in response.get("files", []):
-            recording_id = item.get("properties", {}).get("source_recording_id")
-            if recording_id:
-                ids.add(recording_id)
+            properties = item.get("properties", {})
+            ids.update(value for key, value in properties.items()
+                       if key in ("source_key", "source_notes_id", "source_recording_id") and value)
         page_token = response.get("nextPageToken")
         if not page_token:
             return ids
+
+
+def existing_archive_doc_id(drive, destination_folder_id, meeting):
+    """Recover output if a worker stopped after the Drive write completed."""
+    page_token = None
+    while True:
+        response = drive.files().list(
+            q=f"'{destination_folder_id}' in parents and trashed = false",
+            fields="nextPageToken,files(id,properties)", pageSize=1000,
+            pageToken=page_token, supportsAllDrives=True,
+            includeItemsFromAllDrives=True,
+        ).execute()
+        for item in response.get("files", []):
+            properties = item.get("properties", {})
+            if (properties.get("source_key") == meeting.source_key or
+                    properties.get("source_notes_id") == meeting.notes_id or
+                    (meeting.recording_id and properties.get("source_recording_id") == meeting.recording_id)):
+                return item["id"]
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return None
 
 
 def export_transcript(drive, meeting):
@@ -200,6 +255,39 @@ def export_transcript(drive, meeting):
     if markers:
         return text[markers[-1].start():].strip()
     return ""
+
+
+def person_context(drive, meeting):
+    """Extract spelling hints, never speech content, from the Meet documents."""
+    names = set()
+    emails = set()
+    for doc_id in meeting.context_doc_ids:
+        raw = drive.files().export(fileId=doc_id, mimeType="text/plain").execute()
+        content = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+        emails.update(re.findall(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", content, re.I))
+        transcript_start = list(re.finditer(r"(?im)^.*? - Transcript\s*$", content))
+        transcript = content[transcript_start[-1].start():] if transcript_start else content
+        for candidate in re.findall(r"(?m)^([^:\r\n]{2,70}):[ \t]", transcript):
+            candidate = candidate.strip()
+            if (re.search(r"[A-Za-zÀ-ž]", candidate) and
+                    not re.search(r"\b(summary|details|agenda|action items)\b", candidate, re.I)):
+                names.add(candidate)
+    owner = drive.files().get(
+        fileId=meeting.notes_id, fields="owners(displayName,emailAddress)",
+        supportsAllDrives=True,
+    ).execute().get("owners", [])
+    for person in owner:
+        if person.get("emailAddress"):
+            emails.add(person["emailAddress"])
+    name_list = sorted(names)[:30]
+    email_list = sorted(emails)[:30]
+    return (
+        f"Possible speaker spellings from the Meet transcript: {', '.join(name_list) or 'none'}. "
+        f"Emails found in the Meet documents or organizer metadata: {', '.join(email_list) or 'none'}. "
+        "These are hints, not proof that each person attended or spoke. Use a name only "
+        "when the audio supports the identification; otherwise use neutral speaker labels. "
+        "Do not copy speech wording from the Meet transcript."
+    )
 
 
 @contextmanager
@@ -330,14 +418,9 @@ class AudioGemini:
                 LOGGER.warning("Could not delete temporary Gemini upload %s", uploaded.name)
 
     def detect_language(self, chunks):
-        """Classify sampled audio, treating silence as a separate outcome."""
-        sample = [chunks[0]]
-        if len(chunks) > 1:
-            sample.append(chunks[len(chunks) // 2])
-        if len(chunks) > 2:
-            sample.append(chunks[-1])
+        """Check every chunk so a non-English section is not missed."""
         answers = []
-        for chunk in dict.fromkeys(sample):
+        for chunk in chunks:
             answer = self._with_uploaded_audio(
                 chunk,
                 "Identify speech in this meeting audio. Reply with exactly NO_SPEECH "
@@ -347,13 +430,15 @@ class AudioGemini:
                 32,
             )
             answers.append(answer.strip().upper())
+            if answers[-1] not in ("ENGLISH", "NO_SPEECH"):
+                return "other"
         if "OTHER" in answers or any(answer not in ("ENGLISH", "NO_SPEECH") for answer in answers):
             return "other"
         if "ENGLISH" in answers:
             return "english"
         return "no_speech"
 
-    def translate_chunks(self, chunks):
+    def translate_chunks(self, chunks, people=""):
         sections = []
         for index, chunk in enumerate(chunks):
             text = self._with_uploaded_audio(
@@ -363,7 +448,7 @@ class AudioGemini:
                 "including decisions, numbers, names, and action items. Do not summarize, "
                 "invent speech, or omit repetitions. Use speaker labels only when you can "
                 "distinguish speakers reliably; otherwise use neutral labels. Return only "
-                "the English transcript in chronological order.",
+                f"the English transcript in chronological order. {people}",
                 16384,
             )
             start = index * CHUNK_SECONDS
@@ -374,20 +459,24 @@ class AudioGemini:
 def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, method):
     """Publish only after transcription succeeds; remove an incomplete draft."""
     title = f"{meeting.folder_name} - English Transcript"
+    properties = {
+        "source_key": meeting.source_key,
+        "source_notes_id": meeting.notes_id,
+        "transcription_method": method,
+    }
+    if meeting.recording_id:
+        properties["source_recording_id"] = meeting.recording_id
     body = {
         "name": title,
         "mimeType": DOC_MIME,
         "parents": [destination_folder_id],
-        "properties": {
-            "source_recording_id": meeting.recording_id,
-            "source_notes_id": meeting.notes_id,
-            "transcription_method": method,
-        },
+        "properties": properties,
     }
     created = drive.files().create(body=body, fields="id,webViewLink", supportsAllDrives=True).execute()
     content = (
         f"{title}\n\n"
-        f"Source recording: https://drive.google.com/file/d/{meeting.recording_id}/view\n"
+        f"Source recording: "
+        f"{f'https://drive.google.com/file/d/{meeting.recording_id}/view' if meeting.recording_id else 'not available after one hour'}\n"
         f"Source notes: https://docs.google.com/document/d/{meeting.notes_id}/edit\n"
         f"Method: {method}\n\n{transcript}\n"
     )
@@ -400,6 +489,41 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
         drive.files().delete(fileId=created["id"], supportsAllDrives=True).execute()
         raise
     return created["id"]
+
+
+def process_meeting(drive, docs, credentials, gemini, destination_folder_id, meeting):
+    """Write one shared transcript from audio or the one-hour Doc fallback."""
+    if not meeting.recording_id:
+        transcript = export_transcript(drive, meeting)
+        method = "Google Meet transcript (recording unavailable after one hour)"
+        if not transcript:
+            raise RuntimeError(f"Meet document {meeting.notes_id} has no transcript yet")
+    else:
+        if duration_exceeds_limit(meeting.duration_seconds):
+            return None
+        with tempfile.TemporaryDirectory(prefix="meeting-audio-") as workdir:
+            with recording_proxy(credentials, meeting.recording_id) as recording_url:
+                duration = meeting.duration_seconds
+                if duration is None:
+                    duration = probe_duration_seconds(recording_url)
+                if duration_exceeds_limit(duration):
+                    return None
+                chunks = extract_audio_chunks(recording_url, workdir)
+            language = gemini.detect_language(chunks)
+            if language == "no_speech":
+                return None
+            if language == "english":
+                transcript = export_transcript(drive, meeting)
+                method = "Google Meet transcript (English)"
+                if not transcript:
+                    transcript = gemini.translate_chunks(chunks)
+                    method = "Gemini audio transcription (English fallback)"
+            else:
+                transcript = gemini.translate_chunks(chunks, person_context(drive, meeting))
+                method = "Gemini audio transcription and English translation"
+    if not transcript:
+        raise RuntimeError(f"No transcript for Meet document {meeting.notes_id}")
+    return create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, method)
 
 
 def run_archive(source_folder_id, destination_folder_id, api_key,
@@ -426,41 +550,14 @@ def run_archive(source_folder_id, destination_folder_id, api_key,
         for meeting in find_meetings(drive, folder, minimum_age_minutes):
             if len(created) >= max_meetings:
                 break
-            if meeting.recording_id in archived:
+            if (meeting.source_key in archived or meeting.notes_id in archived or
+                    meeting.recording_id in archived):
                 continue
-            if duration_exceeds_limit(meeting.duration_seconds):
-                LOGGER.info("Skipping recording %s: duration exceeds eight hours", meeting.recording_id)
-                continue
-            with tempfile.TemporaryDirectory(prefix="meeting-audio-") as workdir:
-                with recording_proxy(credentials, meeting.recording_id) as recording_url:
-                    duration = meeting.duration_seconds
-                    if duration is None:
-                        duration = probe_duration_seconds(recording_url)
-                    if duration_exceeds_limit(duration):
-                        LOGGER.info("Skipping recording %s: duration exceeds eight hours", meeting.recording_id)
-                        continue
-                    chunks = extract_audio_chunks(recording_url, workdir)
-                language = gemini.detect_language(chunks)
-                if language == "no_speech":
-                    LOGGER.info("Skipping recording %s: no intelligible speech", meeting.recording_id)
-                    continue
-                if language == "english":
-                    transcript = export_transcript(drive, meeting)
-                    method = "Google Meet transcript (English)"
-                    if not transcript:
-                        transcript = gemini.translate_chunks(chunks)
-                        method = "Gemini audio transcription (English fallback)"
-                else:
-                    transcript = gemini.translate_chunks(chunks)
-                    method = "Gemini audio transcription and English translation"
-                if not transcript:
-                    raise RuntimeError(f"No transcript for recording {meeting.recording_id}")
-                doc_id = create_archive_doc(
-                    drive, docs, destination_folder_id, meeting, transcript, method
-                )
-                archived.add(meeting.recording_id)
+            doc_id = process_meeting(drive, docs, credentials, gemini, destination_folder_id, meeting)
+            if doc_id:
+                archived.add(meeting.source_key)
                 created.append(doc_id)
-                LOGGER.info("Archived recording %s as Doc %s", meeting.recording_id, doc_id)
+                LOGGER.info("Archived Meet document %s as Doc %s", meeting.notes_id, doc_id)
     return created
 
 

@@ -3,32 +3,48 @@
 ## Meet audio archive MVP
 
 `audio_archive.py` is a separate path for the newer Google Meet folder layout.
-It scans meeting folders under a configured personal `Google Meet` folder and
-waits until a Google Doc and an MP4 recording are both present and unchanged for
-five minutes. Shortcuts are followed only when the service account can read
-their targets. Recurring meeting folders are matched by the meeting timestamp
-in file names.
+The checker scans meeting folders under configured personal `Google Meet`
+folders every 15 minutes. It waits until a Meet Doc and an MP4 recording are
+both unchanged for five minutes. If a recording has not appeared one hour after
+the Doc's last update, it archives the Meet transcript alone. A visible but
+unfinished recording is allowed to settle before processing. Shortcuts are
+followed only when the service account can read their targets. Recurring
+meeting folders are matched by the meeting timestamp in file names.
 
 The recording's audio is extracted to 15-minute MP3 chunks. Gemini
-`gemini-3.5-flash-lite` identifies the spoken language from audio. For English,
-the Google Meet transcript is used when available; for other languages, Gemini
-transcribes and translates each audio chunk into English. The output is a new
-Google Doc in the configured shared-drive folder, with links to the source
-recording and notes. Source files are not modified or copied. The destination
-Doc stores the recording ID as a Drive property to prevent duplicate output.
+`gemini-3.5-flash-lite` checks every audio chunk for non-English speech. For
+English, the Google Meet transcript is used when available; for other languages,
+Gemini transcribes and translates each audio chunk into English. Speaker names
+and emails found in the Meet Docs are supplied only as spelling hints for the
+audio transcription. The output is a new Google Doc in the configured
+shared-drive folder, with links to available source files. Source files are not
+modified or copied. The destination Doc stores a stable source key and source
+IDs as Drive properties to prevent duplicate output.
 
 Recordings longer than eight hours are skipped. Video size is not capped:
 `ffmpeg` reads the MP4 through a local proxy backed by Google Drive byte-range
 requests, so only compressed audio chunks use temporary storage. The
-`Dockerfile.archive` and `archive_job.py` form a separate Cloud Run Job from
-the existing organizer; this repository does not create or schedule that job
-by itself. Configure its task timeout for long meetings (for example, 12 hours)
-when deploying it.
+`Dockerfile.checker` and `archive_checker.py` form a short private Cloud Run
+service for Cloud Scheduler (`*/15 * * * *`); `Dockerfile.archive` and
+`archive_job.py` form a separate Cloud Run Job for each ready meeting. Firestore
+claims prevent overlapping checks and retries from launching duplicate work.
+This repository does not create or schedule those resources by itself. Enable
+the Firestore API and create a Firestore database before deployment. The checker
+service account needs Firestore read/write permission and Cloud Run Job execute
+with overrides permission. The job service account needs Firestore read/write,
+Drive access to the source and destination folders, and the Gemini API key.
+Configure the job task timeout for long meetings (for example, 12 hours).
+
 Set `MEETING_SOURCE_FOLDER_IDS` (comma-separated),
-`ARCHIVE_DESTINATION_FOLDER_ID`, and `GOOGLE_AI_API_KEY` for that job. The
-`ARCHIVE_MAX_MEETINGS_PER_ROOT` setting defaults to three per run. The
-source folders must be shared with its service account; access to a shortcut
-does not grant access to the shortcut's target.
+`ARCHIVE_DESTINATION_FOLDER_ID`, `ARCHIVE_JOB_NAME` (full resource name), and
+`ARCHIVE_START_TIME` (ISO timestamp with timezone) on the checker. The start
+time limits automatic discovery to newly created Docs so deployment does not
+unexpectedly backfill historical meetings. Set `ARCHIVE_DESTINATION_FOLDER_ID`
+and `GOOGLE_AI_API_KEY` on the job; the checker supplies `ARCHIVE_STATE_ID` for
+each execution. `ARCHIVE_DISPATCH_LIMIT` defaults to five meetings per check.
+The source folders must be shared with the job's service account; access to a
+shortcut does not grant access to the shortcut's target. Keep the existing
+organizer and Chat summary pipeline configured separately.
 
 A powerful tool that automatically organizes your Google Meet transcripts into categorized folders using Google Drive API and Gemini AI. Perfect for teams and individuals who want to maintain a clean and organized meeting archive.
 
