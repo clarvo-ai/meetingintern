@@ -1,5 +1,34 @@
 # MeetingIntern
 
+## Meet audio archive MVP
+
+`audio_archive.py` is a separate path for the newer Google Meet folder layout.
+It scans meeting folders under a configured personal `Google Meet` folder and
+waits until a Google Doc and an MP4 recording are both present and unchanged for
+five minutes. Shortcuts are followed only when the service account can read
+their targets. Recurring meeting folders are matched by the meeting timestamp
+in file names.
+
+The recording's audio is extracted to 15-minute MP3 chunks. Gemini
+`gemini-3.5-flash-lite` identifies the spoken language from audio. For English,
+the Google Meet transcript is used when available; for other languages, Gemini
+transcribes and translates each audio chunk into English. The output is a new
+Google Doc in the configured shared-drive folder, with links to the source
+recording and notes. Source files are not modified or copied. The destination
+Doc stores the recording ID as a Drive property to prevent duplicate output.
+
+The MVP has a 500 MB source-video download limit because Cloud Run's temporary
+filesystem counts against container memory. Larger recordings are logged and
+skipped until a streaming or staged-media path is added. The limit can be set
+with `ARCHIVE_MAX_VIDEO_MB`. The `Dockerfile.archive`
+and `archive_service.py` are a separate deployable from the existing organizer;
+this repository does not create its Cloud Run service or scheduler job by itself.
+Set `MEETING_SOURCE_FOLDER_IDS` (comma-separated),
+`ARCHIVE_DESTINATION_FOLDER_ID`, and `GOOGLE_AI_API_KEY` for that service. The
+`ARCHIVE_MAX_MEETINGS_PER_ROOT` setting defaults to three per run. The
+source folders must be shared with its service account; access to a shortcut
+does not grant access to the shortcut's target.
+
 A powerful tool that automatically organizes your Google Meet transcripts into categorized folders using Google Drive API and Gemini AI. Perfect for teams and individuals who want to maintain a clean and organized meeting archive.
 
 ## 🌟 Features
