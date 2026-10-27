@@ -1,11 +1,12 @@
 """Focused tests for matching and waiting on Meet artifacts."""
 
 import unittest
+from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from audio_archive import (AudioGemini, DOC_MIME, RECORDING_MIME, Meeting, duration_exceeds_limit,
-                           find_meetings, process_meeting)
+                           export_transcript, find_meetings, process_meeting)
 
 
 def artifact(name, mime_type, identifier, changed_minutes_ago=30):
@@ -98,6 +99,22 @@ class ProcessingTests(unittest.TestCase):
     def meeting(self, recording_id="video"):
         return Meeting("key", "folder", "Test", recording_id, "Recording" if recording_id else None,
                        60 if recording_id else None, "notes", "Transcript", ("notes",))
+
+    def test_empty_meet_transcript_does_not_publish_notes_as_speech(self):
+        meeting = replace(self.meeting(None), notes_name="Demo - Notes by Gemini")
+        text = (
+            "Gemini summarized a product demo here.\n\n"
+            "Demo - Transcript\n"
+            "Transcription ended after 00:00:09\n"
+            "This editable transcript was computer generated and might contain errors."
+        )
+        drive = Mock()
+        drive.files.return_value.export.return_value.execute.return_value = text.encode()
+        self.assertEqual(export_transcript(drive, meeting), "")
+        spoken = text.replace("Transcription ended after 00:00:09",
+                              "00:00:03\nHello, everyone.\nTranscription ended after 00:00:09")
+        drive.files.return_value.export.return_value.execute.return_value = spoken.encode()
+        self.assertIn("Hello, everyone.", export_transcript(drive, meeting))
 
     def test_english_recording_uses_meet_transcript(self):
         gemini = Mock()
