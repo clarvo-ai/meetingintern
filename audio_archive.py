@@ -595,7 +595,7 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
     content = (
         f"{title}\n\n"
         f"Source recording: "
-        f"{f'https://drive.google.com/file/d/{meeting.recording_id}/view' if meeting.recording_id else 'not available after one hour'}\n"
+        f"{f'https://drive.google.com/file/d/{meeting.recording_id}/view' if meeting.recording_id else 'not available after three hours'}\n"
         f"Source notes: https://docs.google.com/document/d/{meeting.notes_id}/edit\n"
         f"Method: {method}\n\n{transcript}\n"
     )
@@ -611,10 +611,10 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
 
 
 def process_meeting(drive, docs, credentials, gemini, destination_folder_id, meeting):
-    """Write one shared transcript from audio or the one-hour Doc fallback."""
+    """Write one shared transcript from audio or the three-hour Doc fallback."""
     if not meeting.recording_id:
         transcript = export_transcript(drive, meeting)
-        method = "Google Meet transcript (recording unavailable after one hour)"
+        method = "Google Meet transcript (recording unavailable after three hours)"
         if not transcript:
             raise RuntimeError(f"Meet document {meeting.notes_id} has no transcript yet")
     else:
