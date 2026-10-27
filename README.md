@@ -64,7 +64,9 @@ For customer conversations, the brief keeps customer needs and current context,
 buying considerations, seller claims, and the actual commercial status in
 separate sections. It uses a quote-checked evidence inventory for moderate
 transcripts and a direct synthesis pass for long transcripts. The Chat update
-includes the most important points from those sections.
+includes the most important points from those sections. For moderate-length
+meetings, customer sections use only customer-attributed points with quotes
+that appear in the source transcript.
 
 The brief separates decisions and agreed actions from suggested follow-ups.
 An action is treated as agreed only when a supporting excerpt explicitly
