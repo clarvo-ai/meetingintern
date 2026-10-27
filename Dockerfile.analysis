@@ -1,0 +1,13 @@
+FROM python:3.13-slim
+
+WORKDIR /app
+RUN apt-get update && apt-get install -y --no-install-recommends \
+    ca-certificates \
+    && rm -rf /var/lib/apt/lists/*
+
+COPY requirements.txt .
+RUN pip install --no-cache-dir -r requirements.txt
+COPY audio_archive.py analysis_state.py meeting_analysis.py analysis_job.py ./
+
+ENV PYTHONUNBUFFERED=1
+CMD ["python", "analysis_job.py"]

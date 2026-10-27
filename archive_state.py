@@ -45,6 +45,7 @@ class ArchiveState:
                 "source_root_id": root_id,
                 "meeting_folder_id": meeting.folder_id,
                 "source_notes_id": meeting.notes_id,
+                "source_context_doc_ids": list(getattr(meeting, "context_doc_ids", (meeting.notes_id,))),
                 "updated_at": now,
             }, merge=True)
             return True
@@ -96,12 +97,25 @@ class ArchiveState:
         return claim(self.client.transaction())
 
     def mark_done(self, source_key, output_doc_id=None):
-        self.collection.document(source_key).update({
-            "status": "done" if output_doc_id else "skipped",
-            "output_doc_id": output_doc_id,
-            "lease_until": _utc_now(),
-            "updated_at": _utc_now(),
-        })
+        """Finish archiving and queue analysis in the same document update."""
+        ref = self.collection.document(source_key)
+        now = _utc_now()
+
+        @firestore.transactional
+        def finish(transaction):
+            snapshot = ref.get(transaction=transaction)
+            data = snapshot.to_dict() if snapshot.exists else {}
+            changes = {
+                "status": "done" if output_doc_id else "skipped",
+                "output_doc_id": output_doc_id,
+                "lease_until": now,
+                "updated_at": now,
+            }
+            if output_doc_id and not data.get("analysis_status"):
+                changes["analysis_status"] = "pending"
+            transaction.update(ref, changes)
+
+        finish(self.client.transaction())
 
     def mark_retry(self, source_key, reason, expected_status):
         """Release only the claim that failed, not a newer worker's claim."""

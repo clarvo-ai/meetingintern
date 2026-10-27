@@ -46,6 +46,33 @@ The source folders must be shared with the job's service account; access to a
 shortcut does not grant access to the shortcut's target. Keep the existing
 organizer and Chat summary pipeline configured separately.
 
+## Meeting briefs and Chat updates
+
+When an archive job publishes a full English transcript, it marks that meeting
+ready for a separate analysis job. The 15-minute checker dispatches analysis
+jobs independently, so a summary or Chat failure never reruns audio extraction.
+The analysis job reads the full archived transcript, uses Gemini
+`gemini-3.5-flash-lite` to choose one relationship-based meeting type and several
+topic tags, and creates a companion `Meeting Brief` Doc in the same shared
+folder. The transcript Doc stays untouched. Firestore stores the type, tags,
+brief ID, and delivery status for later reporting and safe retries.
+
+The brief separates decisions and agreed actions from suggested follow-ups.
+An action is treated as agreed only when a supporting excerpt explicitly
+commits someone to it. The job posts one concise update with links to the brief
+and transcript to a configured Google Chat space. Google Chat incoming webhooks
+do not support idempotent request IDs, so a send with an uncertain result is
+held for manual reconciliation rather than retried into a possible duplicate.
+Customer demo search links and the representative's own feedback are outside
+this increment.
+
+Build the third image from `Dockerfile.analysis` with `cloudbuild.archive.yaml`.
+Set `ANALYSIS_JOB_NAME` (full Cloud Run Job resource name) on the checker. Set
+`GOOGLE_AI_API_KEY`, `MEETING_ARCHIVE_CHAT_WEBHOOK`, and
+`MEETING_CHAT_SPACE_ID` on the analysis job. The webhook must belong to that
+space; the job rejects a webhook for another space. The existing organizer's
+General-channel webhook is not used by this flow.
+
 A powerful tool that automatically organizes your Google Meet transcripts into categorized folders using Google Drive API and Gemini AI. Perfect for teams and individuals who want to maintain a clean and organized meeting archive.
 
 ## 🌟 Features
