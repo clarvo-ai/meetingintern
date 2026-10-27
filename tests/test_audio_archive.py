@@ -183,7 +183,7 @@ class ProcessingTests(unittest.TestCase):
              patch("audio_archive.create_archive_doc", return_value="output") as create:
             output = process_meeting(None, None, None, gemini, "destination", self.meeting(None))
         self.assertEqual(output, "output")
-        self.assertIn("recording unavailable after one hour", create.call_args.args[-1])
+        self.assertIn("recording unavailable after three hours", create.call_args.args[-1])
         gemini.detect_language.assert_not_called()
 
     def test_finnish_audio_output_is_translated_before_archive(self):

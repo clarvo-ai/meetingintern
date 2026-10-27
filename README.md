@@ -60,6 +60,11 @@ The analysis job reads the full archived transcript, uses Gemini
 topic tags, and creates a companion `Meeting Brief` Doc in the same shared
 folder. The transcript Doc stays untouched. Firestore stores the type, tags,
 brief ID, and delivery status for later reporting and safe retries.
+For customer conversations, the brief keeps customer needs and current context,
+buying considerations, seller claims, and the actual commercial status in
+separate sections. It uses a quote-checked evidence inventory for moderate
+transcripts and a direct synthesis pass for long transcripts. The Chat update
+includes the most important points from those sections.
 
 The brief separates decisions and agreed actions from suggested follow-ups.
 An action is treated as agreed only when a supporting excerpt explicitly
