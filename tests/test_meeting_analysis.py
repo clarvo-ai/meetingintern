@@ -4,7 +4,8 @@ import unittest
 from unittest.mock import Mock, patch
 
 from meeting_analysis import (EvidenceInventory, EvidencePoint, MAX_INVENTORY_CHARS,
-                              _extract_evidence_inventory, _prefer_company_spelling,
+                              MeetingBrief, _extract_evidence_inventory,
+                              _ground_customer_sections, _prefer_company_spelling,
                               format_brief, format_chat_message, post_chat_message)
 from analysis_job import work_once
 
@@ -62,7 +63,7 @@ class BriefTests(unittest.TestCase):
         }
         brief = format_brief("Customer conversation", "source", payload)
         chat = format_chat_message("Customer conversation", "source", "brief", payload)
-        for section in ("Customer needs and context", "Buying considerations",
+        for section in ("Customer needs and context", "Customer questions and buying considerations",
                         "Seller claims and offers", "Commercial status"):
             self.assertIn(section, brief)
             self.assertIn(section, chat)
@@ -99,6 +100,35 @@ class BriefTests(unittest.TestCase):
         self.assertEqual([point["point"] for point in points], ["Confirmed Slack"])
         self.assertEqual(_extract_evidence_inventory(client, "model", "x" * (MAX_INVENTORY_CHARS + 1)), [])
         client.models.generate_content.assert_called_once()
+
+    def test_published_customer_details_follow_attributed_quotes(self):
+        draft = MeetingBrief.model_validate({
+            **BRIEF,
+            "meeting_type": "unknown", "classification_confidence": "low",
+            "customer_needs": ["They use Lever as their ATS."],
+            "buying_considerations": ["They have 120 users."],
+        })
+        inventory = [
+            {"point": "Asked how their ATS would work with the platform.",
+             "quote": "How does our ATS work with this?", "source": "customer", "kind": "question"},
+            {"point": "Lever is one supported ATS integration.",
+             "quote": "Lever is supported.", "source": "seller", "kind": "claim"},
+        ]
+        grounded = _ground_customer_sections(draft, inventory)
+        self.assertEqual(grounded.customer_needs, [])
+        self.assertEqual(grounded.buying_considerations,
+                         ["Asked how their ATS would work with the platform."])
+
+        internal = MeetingBrief.model_validate({
+            **BRIEF,
+            "customer_needs": ["A customer requirement inferred from an internal chat."],
+            "seller_claims": ["A sales claim inferred from an internal chat."],
+            "commercial_status": "A sale inferred from an internal chat.",
+        })
+        internal = _ground_customer_sections(internal, inventory)
+        self.assertEqual(internal.customer_needs, [])
+        self.assertEqual(internal.seller_claims, [])
+        self.assertIsNone(internal.commercial_status)
 
     def test_webhook_posts_without_unsupported_request_id(self):
         response = Mock(status_code=200)
