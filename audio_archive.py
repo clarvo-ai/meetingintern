@@ -265,13 +265,16 @@ def person_context(drive, meeting):
         raw = drive.files().export(fileId=doc_id, mimeType="text/plain").execute()
         content = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
         emails.update(re.findall(r"\b[A-Z0-9._%+-]+@[A-Z0-9.-]+\.[A-Z]{2,}\b", content, re.I))
-        transcript_start = list(re.finditer(r"(?im)^.*? - Transcript\s*$", content))
-        transcript = content[transcript_start[-1].start():] if transcript_start else content
-        for candidate in re.findall(r"(?m)^([^:\r\n]{2,70}):[ \t]", transcript):
-            candidate = candidate.strip()
-            if (re.search(r"[A-Za-zÀ-ž]", candidate) and
-                    not re.search(r"\b(summary|details|agenda|action items)\b", candidate, re.I)):
+        for candidate in re.findall(r"\[([^\]\r\n]{3,60})\]", content):
+            if re.fullmatch(r"[A-ZÀ-Þ][\wÀ-ÿ'-]+(?:\s+[A-ZÀ-Þ][\wÀ-ÿ'-]+)+", candidate):
                 names.add(candidate)
+        transcript_start = list(re.finditer(r"(?im)^.*? - Transcript\s*$", content))
+        if transcript_start:
+            transcript = content[transcript_start[-1].start():]
+            for candidate in re.findall(r"(?m)^([^:\r\n]{2,70}):[ \t]", transcript):
+                candidate = candidate.strip()
+                if re.fullmatch(r"[A-ZÀ-Þ][\wÀ-ÿ'-]+(?:\s+[A-ZÀ-Þ][\wÀ-ÿ'-]+)+", candidate):
+                    names.add(candidate)
     owner = drive.files().get(
         fileId=meeting.notes_id, fields="owners(displayName,emailAddress)",
         supportsAllDrives=True,
@@ -279,10 +282,12 @@ def person_context(drive, meeting):
     for person in owner:
         if person.get("emailAddress"):
             emails.add(person["emailAddress"])
+        if person.get("displayName") and " " in person["displayName"]:
+            names.add(person["displayName"])
     name_list = sorted(names)[:30]
     email_list = sorted(emails)[:30]
     return (
-        f"Possible speaker spellings from the Meet transcript: {', '.join(name_list) or 'none'}. "
+        f"Possible speaker spellings from the Meet documents: {', '.join(name_list) or 'none'}. "
         f"Emails found in the Meet documents or organizer metadata: {', '.join(email_list) or 'none'}. "
         "These are hints, not proof that each person attended or spoke. Use a name only "
         "when the audio supports the identification; otherwise use neutral speaker labels. "
@@ -417,6 +422,47 @@ class AudioGemini:
             except Exception:
                 LOGGER.warning("Could not delete temporary Gemini upload %s", uploaded.name)
 
+    @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20), reraise=True)
+    def _ask_text(self, prompt, max_output_tokens):
+        """Use a second text pass when audio transcription ignores English output."""
+        response = self.client.models.generate_content(
+            model=self.model,
+            contents=prompt,
+            config=types.GenerateContentConfig(
+                temperature=0, max_output_tokens=max_output_tokens,
+            ),
+        )
+        if not response.text or not response.text.strip():
+            raise RuntimeError("Gemini returned no text")
+        candidate = response.candidates[0] if response.candidates else None
+        if candidate and str(candidate.finish_reason).upper().endswith("MAX_TOKENS"):
+            raise RuntimeError("Gemini text response exceeded the output limit")
+        return response.text.strip()
+
+    def _ensure_english(self, transcript):
+        """Never publish source-language speech as an English transcript."""
+        def classify(text):
+            return self._ask_text(
+                "Classify the language of the speech transcript below. Ignore proper "
+                "names and emails. Reply with exactly ENGLISH if all substantive "
+                "speech is English, or OTHER if any substantive speech is in another "
+                f"language or you are unsure.\n\n{text}",
+                32,
+            ).upper()
+
+        if classify(transcript) == "ENGLISH":
+            return transcript
+        translated = self._ask_text(
+            "Translate the following complete speech transcript into natural English. "
+            "Preserve every spoken detail, decision, number, and name. Do not summarize "
+            "or invent speech. Return only English, except proper names.\n\n"
+            f"{transcript}",
+            16384,
+        )
+        if classify(translated) != "ENGLISH":
+            raise RuntimeError("Gemini did not return an English transcript")
+        return translated
+
     def detect_language(self, chunks):
         """Check every chunk so a non-English section is not missed."""
         answers = []
@@ -446,11 +492,17 @@ class AudioGemini:
                 "Transcribe all intelligible speech in this meeting audio. Translate "
                 "non-English speech into natural English. Preserve the full meaning, "
                 "including decisions, numbers, names, and action items. Do not summarize, "
-                "invent speech, or omit repetitions. Use speaker labels only when you can "
-                "distinguish speakers reliably; otherwise use neutral labels. Return only "
-                f"the English transcript in chronological order. {people}",
+                "invent speech, or omit repetitions. REQUIRED OUTPUT LANGUAGE: ENGLISH "
+                "ONLY. Never quote the original language except proper names. Use "
+                "speaker labels only when you can distinguish speakers reliably; "
+                "otherwise use neutral labels. If there is no intelligible speech, "
+                "reply exactly NO_SPEECH. Return only the English transcript in "
+                f"chronological order. {people}",
                 16384,
             )
+            if text.strip().upper() == "NO_SPEECH":
+                continue
+            text = self._ensure_english(text)
             start = index * CHUNK_SECONDS
             sections.append(f"[Chunk starting {start // 3600:02d}:{(start // 60) % 60:02d}:{start % 60:02d}]\n{text}")
         return "\n\n".join(sections)
@@ -522,6 +574,8 @@ def process_meeting(drive, docs, credentials, gemini, destination_folder_id, mee
                 transcript = gemini.translate_chunks(chunks, person_context(drive, meeting))
                 method = "Gemini audio transcription and English translation"
     if not transcript:
+        if meeting.recording_id:
+            return None
         raise RuntimeError(f"No transcript for Meet document {meeting.notes_id}")
     return create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, method)
 

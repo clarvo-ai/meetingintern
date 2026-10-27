@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from audio_archive import (DOC_MIME, RECORDING_MIME, Meeting, duration_exceeds_limit,
+from audio_archive import (AudioGemini, DOC_MIME, RECORDING_MIME, Meeting, duration_exceeds_limit,
                            find_meetings, process_meeting)
 
 
@@ -132,6 +132,28 @@ class ProcessingTests(unittest.TestCase):
         self.assertEqual(output, "output")
         self.assertIn("recording unavailable after one hour", create.call_args.args[-1])
         gemini.detect_language.assert_not_called()
+
+    def test_finnish_audio_output_is_translated_before_archive(self):
+        gemini = AudioGemini.__new__(AudioGemini)
+        gemini._with_uploaded_audio = Mock(return_value="Tämä on suomenkielinen puhe.")
+        gemini._ask_text = Mock(side_effect=["OTHER", "This is Finnish speech.", "ENGLISH"])
+        result = gemini.translate_chunks(["chunk"])
+        self.assertIn("This is Finnish speech.", result)
+        self.assertNotIn("Tämä", result)
+
+    def test_untranslated_audio_response_fails_closed(self):
+        gemini = AudioGemini.__new__(AudioGemini)
+        gemini._with_uploaded_audio = Mock(return_value="Tämä on suomenkielinen puhe.")
+        gemini._ask_text = Mock(side_effect=["OTHER", "Tämä on edelleen suomea.", "OTHER"])
+        with self.assertRaisesRegex(RuntimeError, "did not return an English transcript"):
+            gemini.translate_chunks(["chunk"])
+
+    def test_silent_audio_chunk_does_not_create_invented_speech(self):
+        gemini = AudioGemini.__new__(AudioGemini)
+        gemini._with_uploaded_audio = Mock(return_value="NO_SPEECH")
+        gemini._ask_text = Mock()
+        self.assertEqual(gemini.translate_chunks(["chunk"]), "")
+        gemini._ask_text.assert_not_called()
 
 
 if __name__ == "__main__":
