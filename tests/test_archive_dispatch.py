@@ -4,11 +4,11 @@ import unittest
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
-from archive_checker import check_once, dispatch_analysis_jobs
+from archive_checker import check_once, dispatch_analysis_jobs, source_groups
 from archive_job import work_once as archive_work_once
 from analysis_state import AnalysisState
 from archive_state import ArchiveState
-from audio_archive import FOLDER_MIME, Meeting
+from audio_archive import Meeting
 
 
 class FakeSnapshot:
@@ -89,10 +89,7 @@ class DispatchTests(unittest.TestCase):
         state.reserve_for_dispatch.return_value = True
         launch = Mock(return_value="execution")
         with patch("archive_checker.find_archived_recordings", return_value=set()), \
-             patch("archive_checker.list_children", return_value=[
-                 {"id": "folder", "name": "meeting", "mimeType": FOLDER_MIME}
-             ]), \
-             patch("archive_checker.find_meetings", return_value=[meeting]):
+             patch("archive_checker.find_meetings_across_roots", return_value=[meeting]):
             result = check_once(["root-one", "root-two"], "destination", "job", state, None,
                                 launch=launch)
         self.assertEqual(result["dispatched_count"], 1)
@@ -120,6 +117,31 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result, "output-doc")
         process.assert_called_once()
         state.mark_done.assert_called_once_with("old-key", "output-doc")
+
+    def test_archive_worker_rechecks_both_roots_before_processing(self):
+        meeting = Meeting("key", "notes-folder", "Demo", "video", "Recording",
+                          60, "source-doc", "Notes by Gemini", ("source-doc",),
+                          "video-folder")
+        state = Mock()
+        state.claim_for_work.return_value = {
+            "source_root_ids": ["notes-root", "video-root"],
+            "source_notes_id": "source-doc", "source_context_doc_ids": ["source-doc"],
+        }
+        with patch("archive_job.build", return_value=Mock()), \
+             patch("archive_job.find_meetings_across_roots", return_value=[meeting]) as discover, \
+             patch("archive_job.existing_archive_doc_id", return_value=None), \
+             patch("archive_job.process_meeting", return_value="output-doc") as process:
+            result = archive_work_once("key", "destination", "key", state, Mock())
+        self.assertEqual(result, "output-doc")
+        discover.assert_called_once_with(unittest.mock.ANY, ["notes-root", "video-root"])
+        process.assert_called_once()
+
+    def test_root_groups_keep_owners_separate(self):
+        self.assertEqual(source_groups(["juha", "robert"]), [["juha"], ["robert"]])
+        self.assertEqual(source_groups([], '[["juha"],["robert-a","robert-b"]]'),
+                         [["juha"], ["robert-a", "robert-b"]])
+        with self.assertRaisesRegex(ValueError, "only one owner group"):
+            source_groups([], '[["robert-a"],["robert-a"]]')
 
     def test_analysis_claim_blocks_duplicate_dispatch_and_worker(self):
         state = AnalysisState.__new__(AnalysisState)

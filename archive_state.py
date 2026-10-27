@@ -24,7 +24,7 @@ class ArchiveState:
         self.client = firestore.Client(project=project_id)
         self.collection = self.client.collection("meeting_audio_archive")
 
-    def reserve_for_dispatch(self, meeting, root_id):
+    def reserve_for_dispatch(self, meeting, root_id, root_ids=None):
         """Atomically reserve a meeting so concurrent checks launch one job."""
         ref = self.collection.document(meeting.source_key)
         now = _utc_now()
@@ -43,7 +43,10 @@ class ArchiveState:
                 "status": "dispatching",
                 "lease_until": now + DISPATCH_LEASE,
                 "source_root_id": root_id,
+                "source_root_ids": list(root_ids or [root_id]),
                 "meeting_folder_id": meeting.folder_id,
+                "recording_folder_id": getattr(meeting, "recording_folder_id", None),
+                "source_recording_id": getattr(meeting, "recording_id", None),
                 "source_notes_id": meeting.notes_id,
                 "source_context_doc_ids": list(getattr(meeting, "context_doc_ids", (meeting.notes_id,))),
                 "updated_at": now,

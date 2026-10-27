@@ -6,7 +6,8 @@ from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
 from audio_archive import (AudioGemini, DOC_MIME, RECORDING_MIME, Meeting, duration_exceeds_limit,
-                           export_transcript, find_meetings, process_meeting)
+                           export_transcript, find_meetings, find_meetings_in_folders,
+                           process_meeting)
 
 
 def artifact(name, mime_type, identifier, changed_minutes_ago=30):
@@ -60,8 +61,8 @@ class MeetingDiscoveryTests(unittest.TestCase):
         with patch("audio_archive.list_children", return_value=children):
             self.assertEqual(find_meetings(None, {"id": "folder", "name": "Test"}), [])
 
-    def test_transcript_only_waits_one_hour_and_keeps_identity_when_video_arrives(self):
-        notes = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "notes", 61)
+    def test_transcript_only_waits_three_hours_and_keeps_identity_when_video_arrives(self):
+        notes = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "notes", 181)
         folder = {"id": "folder", "name": "Test"}
         with patch("audio_archive.list_children", return_value=[notes]), \
              patch("audio_archive.export_transcript", return_value="Ready transcript"):
@@ -75,11 +76,11 @@ class MeetingDiscoveryTests(unittest.TestCase):
         self.assertEqual(recorded[0].recording_id, "video")
         self.assertEqual(recorded[0].source_key, fallback[0].source_key)
 
-        recent = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "recent", 59)
+        recent = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "recent", 179)
         with patch("audio_archive.list_children", return_value=[recent]):
             self.assertEqual(find_meetings(None, folder), [])
 
-        old_created = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "editing", 90)
+        old_created = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "editing", 190)
         old_created["modifiedTime"] = recent["modifiedTime"]
         with patch("audio_archive.list_children", return_value=[old_created]):
             self.assertEqual(find_meetings(None, folder), [])
@@ -89,10 +90,40 @@ class MeetingDiscoveryTests(unittest.TestCase):
             self.assertEqual(find_meetings(None, folder), [])
 
     def test_new_recording_blocks_transcript_fallback_until_settled(self):
-        notes = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "notes", 90)
+        notes = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "notes", 190)
         video = artifact("Test - 2026/10/27 09:00 EET - Recording", RECORDING_MIME, "video", 1)
         with patch("audio_archive.list_children", return_value=[notes, video]):
             self.assertEqual(find_meetings(None, {"id": "folder", "name": "Test"}), [])
+
+    def test_pairs_recording_and_notes_in_different_folders(self):
+        notes = artifact("Demo | Robert - 2026/10/27 09:59 EET - Notes by Gemini",
+                         DOC_MIME, "notes", 190)
+        recording = artifact("Demo | Robert - 2026/10/27 09:59 EET - Recording",
+                             RECORDING_MIME, "video", 10)
+        recording["videoMediaMetadata"] = {"durationMillis": "2208458"}
+        def children(_drive, folder_id):
+            return {"notes-folder": [notes], "video-folder": [recording]}[folder_id]
+        with patch("audio_archive.list_children", side_effect=children):
+            result = find_meetings_in_folders(None, [{"id": "notes-folder"},
+                                                      {"id": "video-folder"}])
+        self.assertEqual(len(result), 1)
+        self.assertEqual(result[0].recording_id, "video")
+        self.assertEqual(result[0].recording_folder_id, "video-folder")
+        self.assertEqual(result[0].folder_id, "notes-folder")
+
+    def test_same_time_unrelated_recording_in_other_folder_does_not_pair(self):
+        notes = artifact("Internal planning - 2026/10/27 09:59 EET - Transcript",
+                         DOC_MIME, "notes", 181)
+        recording = artifact("Customer demo - 2026/10/27 09:59 EET - Recording",
+                             RECORDING_MIME, "unrelated-video", 10)
+        def children(_drive, folder_id):
+            return {"notes-folder": [notes], "video-folder": [recording]}[folder_id]
+        with patch("audio_archive.list_children", side_effect=children), \
+             patch("audio_archive.export_transcript", return_value="Real speech"):
+            result = find_meetings_in_folders(None, [{"id": "notes-folder"},
+                                                      {"id": "video-folder"}])
+        self.assertEqual(len(result), 1)
+        self.assertIsNone(result[0].recording_id)
 
 
 class ProcessingTests(unittest.TestCase):

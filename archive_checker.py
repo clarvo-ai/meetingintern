@@ -1,5 +1,6 @@
 """Fast Cloud Run checker, intended for a 15-minute Cloud Scheduler cadence."""
 
+import json
 import logging
 import os
 import re
@@ -12,8 +13,8 @@ from googleapiclient.discovery import build
 
 from analysis_state import AnalysisState
 from archive_state import ArchiveState
-from audio_archive import (FOLDER_MIME, drive_credentials, find_archived_recordings,
-                           find_meetings, list_children)
+from audio_archive import (drive_credentials, find_archived_recordings,
+                           find_meetings_across_roots)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -66,40 +67,51 @@ def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
 
 def check_once(roots, destination_folder_id, job_name, state, drive, dispatch_limit=5,
                launch=launch_job, not_before=None):
-    """Discover only ready meetings and reserve each before launching work."""
+    """Pair artifacts inside each owner's root group before dispatching."""
     archived = find_archived_recordings(drive, destination_folder_id)
     dispatched = []
     ready_count = 0
     seen_docs = set()
     seen_recordings = set()
-    for root_id in roots:
-        folders = [item for item in list_children(drive, root_id)
-                   if item["mimeType"] == FOLDER_MIME and item["name"] != "Meet Recordings"]
-        folders.sort(key=lambda item: item.get("createdTime", ""), reverse=True)
-        for folder in folders:
-            for meeting in find_meetings(drive, folder, not_before=not_before):
-                ready_count += 1
-                if (meeting.notes_id in seen_docs or
-                        (meeting.recording_id and meeting.recording_id in seen_recordings)):
-                    continue
-                seen_docs.add(meeting.notes_id)
-                if meeting.recording_id:
-                    seen_recordings.add(meeting.recording_id)
-                if (meeting.source_key in archived or meeting.notes_id in archived or
-                        meeting.recording_id in archived):
-                    continue
-                if len(dispatched) >= dispatch_limit:
-                    continue
-                if not state.reserve_for_dispatch(meeting, root_id):
-                    continue
-                try:
-                    execution = launch(job_name, meeting.source_key)
-                    state.mark_queued(meeting.source_key, execution)
-                    dispatched.append(meeting.source_key)
-                except Exception as error:
-                    state.mark_retry(meeting.source_key, error, "dispatching")
-                    LOGGER.exception("Could not launch archive job for %s", meeting.source_key)
+    for group in roots:
+        root_ids = [group] if isinstance(group, str) else list(group)
+        for meeting in find_meetings_across_roots(drive, root_ids, not_before=not_before):
+            ready_count += 1
+            if (meeting.notes_id in seen_docs or
+                    (meeting.recording_id and meeting.recording_id in seen_recordings)):
+                continue
+            seen_docs.add(meeting.notes_id)
+            if meeting.recording_id:
+                seen_recordings.add(meeting.recording_id)
+            if (meeting.source_key in archived or meeting.notes_id in archived or
+                    meeting.recording_id in archived):
+                continue
+            if len(dispatched) >= dispatch_limit:
+                continue
+            if not state.reserve_for_dispatch(meeting, root_ids[0], root_ids=root_ids):
+                continue
+            try:
+                execution = launch(job_name, meeting.source_key)
+                state.mark_queued(meeting.source_key, execution)
+                dispatched.append(meeting.source_key)
+            except Exception as error:
+                state.mark_retry(meeting.source_key, error, "dispatching")
+                LOGGER.exception("Could not launch archive job for %s", meeting.source_key)
     return {"ready_count": ready_count, "dispatched_count": len(dispatched)}
+
+
+def source_groups(flat_roots, groups_json=None):
+    """Explicit groups prevent accidentally pairing meetings from different owners."""
+    groups = json.loads(groups_json) if groups_json else [[root] for root in flat_roots]
+    if (not isinstance(groups, list) or not groups
+            or any(not isinstance(group, list) or not group or
+                   any(not isinstance(root, str) or not root for root in group)
+                   for group in groups)):
+        raise ValueError("MEETING_SOURCE_FOLDER_GROUPS_JSON must be nonempty root ID arrays")
+    ids = [root for group in groups for root in group]
+    if len(ids) != len(set(ids)):
+        raise ValueError("A Google Meet root may appear in only one owner group")
+    return groups
 
 
 @app.get("/health")
@@ -110,7 +122,8 @@ def health():
 @app.post("/")
 def check_meetings():
     """The endpoint stays short; transcription happens in Cloud Run Jobs."""
-    roots = [item.strip() for item in os.getenv("MEETING_SOURCE_FOLDER_IDS", "").split(",") if item.strip()]
+    flat_roots = [item.strip() for item in os.getenv("MEETING_SOURCE_FOLDER_IDS", "").split(",") if item.strip()]
+    roots = source_groups(flat_roots, os.getenv("MEETING_SOURCE_FOLDER_GROUPS_JSON"))
     destination = os.getenv("ARCHIVE_DESTINATION_FOLDER_ID")
     job_name = os.getenv("ARCHIVE_JOB_NAME")
     start_time = os.getenv("ARCHIVE_START_TIME")
