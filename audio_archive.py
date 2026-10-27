@@ -2,28 +2,32 @@
 
 This is intentionally separate from the legacy summary and Chat pipeline.  It
 reads personal Meet folders, writes a new Doc to a shared drive, and never edits
-the source files.  The same entry point runs locally or behind Cloud Scheduler.
+the source files.  The same flow runs locally or as a Cloud Run Job.
 """
 
 import argparse
+from contextlib import contextmanager
 import logging
 import os
 import re
 import subprocess
 import tempfile
+import threading
 import time
 from dataclasses import dataclass
 from datetime import datetime, timezone
+from http.server import BaseHTTPRequestHandler, ThreadingHTTPServer
 from pathlib import Path
 
 import google.auth
+import requests
 from google.auth import impersonated_credentials
+from google.auth.transport.requests import Request as GoogleAuthRequest
 from google import genai
 from google.genai import types
 from google.oauth2.credentials import Credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
-from googleapiclient.http import MediaIoBaseDownload
 from tenacity import retry, stop_after_attempt, wait_exponential
 
 
@@ -33,7 +37,12 @@ DOC_MIME = "application/vnd.google-apps.document"
 SHORTCUT_MIME = "application/vnd.google-apps.shortcut"
 RECORDING_MIME = "video/mp4"
 CHUNK_SECONDS = 15 * 60
-MAX_VIDEO_BYTES = int(os.getenv("ARCHIVE_MAX_VIDEO_MB", "500")) * 1024 * 1024
+MAX_DURATION_SECONDS = 8 * 60 * 60
+
+
+def duration_exceeds_limit(seconds):
+    """Exactly eight hours remains eligible; longer recordings do not."""
+    return seconds is not None and seconds > MAX_DURATION_SECONDS
 
 
 @dataclass(frozen=True)
@@ -42,7 +51,7 @@ class Meeting:
     folder_name: str
     recording_id: str
     recording_name: str
-    recording_size: int
+    duration_seconds: float | None
     notes_id: str
     notes_name: str
 
@@ -79,7 +88,7 @@ def list_children(drive, folder_id):
     while True:
         response = drive.files().list(
             q=f"'{folder_id}' in parents and trashed = false",
-            fields="nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,shortcutDetails)",
+            fields="nextPageToken,files(id,name,mimeType,size,createdTime,modifiedTime,shortcutDetails,videoMediaMetadata(durationMillis))",
             pageSize=1000,
             pageToken=page_token,
             supportsAllDrives=True,
@@ -100,7 +109,7 @@ def _resolve_item(drive, item):
     try:
         resolved = drive.files().get(
             fileId=target["targetId"],
-            fields="id,name,mimeType,size,createdTime,modifiedTime",
+            fields="id,name,mimeType,size,createdTime,modifiedTime,videoMediaMetadata(durationMillis)",
             supportsAllDrives=True,
         ).execute()
         resolved["displayName"] = item["name"]
@@ -150,7 +159,10 @@ def find_meetings(drive, folder, minimum_age_minutes=5):
         meetings.append(Meeting(
             folder_id=folder["id"], folder_name=meeting_name,
             recording_id=recording["id"], recording_name=recording["name"],
-            recording_size=int(recording.get("size", 0)),
+            duration_seconds=(
+                int(recording["videoMediaMetadata"]["durationMillis"]) / 1000
+                if recording.get("videoMediaMetadata", {}).get("durationMillis") else None
+            ),
             notes_id=notes["id"], notes_name=notes["name"],
         ))
     return meetings
@@ -190,24 +202,81 @@ def export_transcript(drive, meeting):
     return ""
 
 
-def download_recording(drive, recording_id, target):
-    """Stream media to disk without holding a large MP4 in process memory."""
-    request = drive.files().get_media(fileId=recording_id, supportsAllDrives=True)
-    with open(target, "wb") as output:
-        downloader = MediaIoBaseDownload(output, request, chunksize=8 * 1024 * 1024)
-        done = False
-        while not done:
-            _, done = downloader.next_chunk(num_retries=3)
-            if output.tell() > MAX_VIDEO_BYTES:
-                raise ValueError("Recording exceeds the configured download limit")
+@contextmanager
+def recording_proxy(credentials, recording_id):
+    """Give ffmpeg a seekable local URL backed by Drive range requests.
+
+    Google Meet MP4 files may need a seek to read their metadata.  The proxy
+    keeps the OAuth token out of ffmpeg arguments and avoids storing video in
+    Cloud Run's memory-backed filesystem.
+    """
+    provider_url = f"https://www.googleapis.com/drive/v3/files/{recording_id}"
+
+    class Handler(BaseHTTPRequestHandler):
+        def do_GET(self):
+            self._relay("GET")
+
+        def do_HEAD(self):
+            self._relay("HEAD")
+
+        def _relay(self, method):
+            if self.path != "/recording.mp4":
+                self.send_error(404)
+                return
+            headers = {}
+            credentials.before_request(GoogleAuthRequest(), method, provider_url, headers)
+            if self.headers.get("Range"):
+                headers["Range"] = self.headers["Range"]
+            try:
+                with requests.request(
+                    method, provider_url,
+                    params={"alt": "media", "supportsAllDrives": "true"},
+                    headers=headers, stream=True, timeout=(15, 300),
+                ) as upstream:
+                    self.send_response(upstream.status_code)
+                    for name in ("Content-Type", "Content-Length", "Content-Range", "Accept-Ranges"):
+                        if upstream.headers.get(name):
+                            self.send_header(name, upstream.headers[name])
+                    self.end_headers()
+                    if method == "GET":
+                        for chunk in upstream.iter_content(1024 * 1024):
+                            if chunk:
+                                self.wfile.write(chunk)
+            except (BrokenPipeError, ConnectionResetError):
+                # ffmpeg closes a range request when it has enough metadata.
+                pass
+
+        def log_message(self, _format, *_args):
+            pass
+
+    server = ThreadingHTTPServer(("127.0.0.1", 0), Handler)
+    server.daemon_threads = True
+    worker = threading.Thread(target=server.serve_forever, daemon=True)
+    worker.start()
+    try:
+        yield f"http://127.0.0.1:{server.server_port}/recording.mp4"
+    finally:
+        server.shutdown()
+        server.server_close()
+        worker.join(timeout=5)
 
 
-def extract_audio_chunks(recording, output_dir):
+def probe_duration_seconds(recording_url):
+    """Use ffprobe when Drive has not populated videoMediaMetadata yet."""
+    result = subprocess.run(
+        ["ffprobe", "-v", "error", "-show_entries", "format=duration",
+         "-of", "default=noprint_wrappers=1:nokey=1", recording_url],
+        check=True, capture_output=True, text=True,
+    )
+    return float(result.stdout.strip())
+
+
+def extract_audio_chunks(recording_url, output_dir):
     """Compress the audio track and split it so each answer stays manageable."""
     pattern = str(Path(output_dir) / "audio_%04d.mp3")
     subprocess.run(
         ["ffmpeg", "-nostdin", "-hide_banner", "-loglevel", "error", "-y",
-         "-i", str(recording), "-map", "0:a:0", "-vn", "-ac", "1",
+         "-i", recording_url, "-map", "0:a:0", "-vn", "-ac", "1",
          "-ar", "16000", "-c:a", "libmp3lame", "-b:a", "32k",
          "-f", "segment", "-segment_time", str(CHUNK_SECONDS),
          "-reset_timestamps", "1", pattern],
@@ -359,15 +428,18 @@ def run_archive(source_folder_id, destination_folder_id, api_key,
                 break
             if meeting.recording_id in archived:
                 continue
-            if not meeting.recording_size or meeting.recording_size > MAX_VIDEO_BYTES:
-                LOGGER.warning("Skipping recording %s: size unavailable or exceeds %s MB",
-                               meeting.recording_id, MAX_VIDEO_BYTES // (1024 * 1024))
+            if duration_exceeds_limit(meeting.duration_seconds):
+                LOGGER.info("Skipping recording %s: duration exceeds eight hours", meeting.recording_id)
                 continue
             with tempfile.TemporaryDirectory(prefix="meeting-audio-") as workdir:
-                recording_path = Path(workdir) / "recording.mp4"
-                download_recording(drive, meeting.recording_id, recording_path)
-                chunks = extract_audio_chunks(recording_path, workdir)
-                recording_path.unlink()
+                with recording_proxy(credentials, meeting.recording_id) as recording_url:
+                    duration = meeting.duration_seconds
+                    if duration is None:
+                        duration = probe_duration_seconds(recording_url)
+                    if duration_exceeds_limit(duration):
+                        LOGGER.info("Skipping recording %s: duration exceeds eight hours", meeting.recording_id)
+                        continue
+                    chunks = extract_audio_chunks(recording_url, workdir)
                 language = gemini.detect_language(chunks)
                 if language == "no_speech":
                     LOGGER.info("Skipping recording %s: no intelligible speech", meeting.recording_id)

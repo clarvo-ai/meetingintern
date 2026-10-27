@@ -17,14 +17,15 @@ Google Doc in the configured shared-drive folder, with links to the source
 recording and notes. Source files are not modified or copied. The destination
 Doc stores the recording ID as a Drive property to prevent duplicate output.
 
-The MVP has a 500 MB source-video download limit because Cloud Run's temporary
-filesystem counts against container memory. Larger recordings are logged and
-skipped until a streaming or staged-media path is added. The limit can be set
-with `ARCHIVE_MAX_VIDEO_MB`. The `Dockerfile.archive`
-and `archive_service.py` are a separate deployable from the existing organizer;
-this repository does not create its Cloud Run service or scheduler job by itself.
+Recordings longer than eight hours are skipped. Video size is not capped:
+`ffmpeg` reads the MP4 through a local proxy backed by Google Drive byte-range
+requests, so only compressed audio chunks use temporary storage. The
+`Dockerfile.archive` and `archive_job.py` form a separate Cloud Run Job from
+the existing organizer; this repository does not create or schedule that job
+by itself. Configure its task timeout for long meetings (for example, 12 hours)
+when deploying it.
 Set `MEETING_SOURCE_FOLDER_IDS` (comma-separated),
-`ARCHIVE_DESTINATION_FOLDER_ID`, and `GOOGLE_AI_API_KEY` for that service. The
+`ARCHIVE_DESTINATION_FOLDER_ID`, and `GOOGLE_AI_API_KEY` for that job. The
 `ARCHIVE_MAX_MEETINGS_PER_ROOT` setting defaults to three per run. The
 source folders must be shared with its service account; access to a shortcut
 does not grant access to the shortcut's target.
