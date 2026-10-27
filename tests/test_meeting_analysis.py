@@ -3,7 +3,9 @@
 import unittest
 from unittest.mock import Mock, patch
 
-from meeting_analysis import format_brief, format_chat_message, post_chat_message
+from meeting_analysis import (EvidenceInventory, EvidencePoint, MAX_INVENTORY_CHARS,
+                              _extract_evidence_inventory, _prefer_company_spelling,
+                              format_brief, format_chat_message, post_chat_message)
 from analysis_job import work_once
 
 
@@ -47,6 +49,56 @@ class BriefTests(unittest.TestCase):
         text = format_chat_message("Unknown meeting", "source", "brief", payload)
         self.assertNotIn("*Type:*", text)
         self.assertNotIn("*Topics:*", text)
+
+    def test_customer_details_and_seller_claims_are_separate_in_both_outputs(self):
+        payload = {
+            **BRIEF,
+            "meeting_type": "unknown", "classification_confidence": "low",
+            "meeting_evidence": {"type_supported": False},
+            "customer_needs": ["The customer recruits across two teams."],
+            "buying_considerations": ["They asked whether an existing tool is required."],
+            "seller_claims": ["The seller offered a trial."],
+            "commercial_status": "Evaluation agreed; no purchase decision recorded.",
+        }
+        brief = format_brief("Customer conversation", "source", payload)
+        chat = format_chat_message("Customer conversation", "source", "brief", payload)
+        for section in ("Customer needs and context", "Buying considerations",
+                        "Seller claims and offers", "Commercial status"):
+            self.assertIn(section, brief)
+            self.assertIn(section, chat)
+        self.assertNotIn("*Type:*", chat)
+        self.assertLess(chat.index("The customer recruits"), chat.index("The seller offered"))
+
+    def test_known_brand_spelling_is_corrected_without_changing_evidence_quotes(self):
+        payload = {
+            **BRIEF,
+            "summary": ["The seller showed Klarvo."],
+            "customer_needs": [], "buying_considerations": [],
+            "seller_claims": ["Klarvo offers search."],
+            "commercial_status": "A Klarvo trial was offered.",
+            "agreed_actions": [{"task": "Open Klarvo", "owner": "customer participant",
+                                "due_date": None, "evidence": "I'll open Klarvo"}],
+        }
+        corrected = _prefer_company_spelling(payload)
+        self.assertIn("Clarvo", format_chat_message("Demo", "source", "brief", corrected))
+        self.assertNotIn("Klarvo", format_chat_message("Demo", "source", "brief", corrected))
+        self.assertEqual(corrected["agreed_actions"][0]["evidence"], "I'll open Klarvo")
+
+    def test_evidence_inventory_discards_unquoted_claims_and_bounds_long_meetings(self):
+        client = Mock()
+        client.models.generate_content.return_value = Mock(
+            parsed=EvidenceInventory(points=[
+                EvidencePoint(point="Confirmed Slack", quote="We use Slack.",
+                              source="customer", kind="current_tool"),
+                EvidencePoint(point="Unconfirmed ATS", quote="We use Lever.",
+                              source="customer", kind="current_tool"),
+            ]),
+            candidates=[],
+        )
+        points = _extract_evidence_inventory(client, "model", "We use Slack.")
+        self.assertEqual([point["point"] for point in points], ["Confirmed Slack"])
+        self.assertEqual(_extract_evidence_inventory(client, "model", "x" * (MAX_INVENTORY_CHARS + 1)), [])
+        client.models.generate_content.assert_called_once()
 
     def test_webhook_posts_without_unsupported_request_id(self):
         response = Mock(status_code=200)

@@ -2,13 +2,12 @@
 
 import logging
 import os
-from types import SimpleNamespace
 
 import google.auth
 from googleapiclient.discovery import build
 
 from analysis_state import AnalysisState
-from audio_archive import drive_credentials, person_context
+from audio_archive import drive_credentials
 from meeting_evidence import (archived_speech_body, calendar_client,
                               calendar_invitees, parse_meet_documents,
                               parse_team_roster, source_evidence)
@@ -56,17 +55,19 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
             if notes_id:
                 try:
                     evidence = source_evidence(drive, source_ids)
-                    hints = person_context(drive, SimpleNamespace(
-                        notes_id=notes_id,
-                        context_doc_ids=tuple(source_ids),
-                    ))
+                    hints = ", ".join(dict.fromkeys([
+                        *(evidence.get("speakers") or []),
+                        *(evidence.get("attendees_in_meet_doc") or []),
+                    ]))
                 except Exception:
                     LOGGER.warning("Could not read Meet identity evidence for %s", source_key)
             evidence["archived_speech_words"] = speech["source_speech_words"]
             evidence.update(calendar_invitees(
                 calendar, calendar_ids, source_ids, evidence.get("source_doc_created_at"),
             ))
-            payload = analyze_transcript(api_key, title, transcript, hints, model,
+            # A filename with names does not establish which person represented which side.
+            analysis_title = title if hints else "Meeting recording"
+            payload = analyze_transcript(api_key, analysis_title, transcript, hints, model,
                                          evidence=evidence, roster=roster or {})
         brief_doc_id = data.get("analysis_brief_doc_id") or create_or_find_brief(
             drive, docs, item["parents"][0], source_key,
