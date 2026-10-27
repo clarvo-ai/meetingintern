@@ -250,15 +250,26 @@ def existing_archive_doc_id(drive, destination_folder_id, meeting):
 
 
 def export_transcript(drive, meeting):
+    """Return Meet speech only when its transcript section contains spoken text."""
     raw = drive.files().export(fileId=meeting.notes_id, mimeType="text/plain").execute()
     text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
     if "Transcript" in meeting.notes_name and "Notes by Gemini" not in meeting.notes_name:
-        return text.strip()
-    # Gemini Notes may include its editable transcript after the notes section.
-    markers = list(re.finditer(r"(?im)^.*? - Transcript\s*$", text))
-    if markers:
-        return text[markers[-1].start():].strip()
-    return ""
+        transcript = text.strip()
+    else:
+        # Gemini Notes may include its editable transcript after the notes section.
+        markers = list(re.finditer(r"(?im)^.*? - Transcript\s*$", text))
+        transcript = text[markers[-1].start():].strip() if markers else ""
+    if not transcript:
+        return ""
+    lines = [line.strip() for line in transcript.splitlines() if line.strip()]
+    if lines and re.search(r"(?i) - Transcript$", lines[0]):
+        lines.pop(0)
+    speech = [line for line in lines if not (
+        re.fullmatch(r"\d{1,2}:\d{2}(?::\d{2})?", line) or
+        re.match(r"(?i)^Transcription (?:started|ended)(?: after)?\b", line) or
+        line.startswith("This editable transcript was computer generated")
+    )]
+    return transcript if any(re.search(r"\w", line) for line in speech) else ""
 
 
 def person_context(drive, meeting):
