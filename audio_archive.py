@@ -187,7 +187,7 @@ def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=Non
         owner = next((email for email in owners if email), None)
         identity = f"{owner}|{key}" if owner and key != "single" else f"doc:{notes['id']}"
         source_key = hashlib.sha256(identity.encode()).hexdigest()
-        meetings.append(Meeting(
+        meeting = Meeting(
             source_key=source_key,
             folder_id=folder["id"], folder_name=meeting_name,
             recording_id=recording["id"] if recording else None,
@@ -198,7 +198,11 @@ def find_meetings(drive, folder, minimum_age_minutes=5, now=None, not_before=Non
             ),
             notes_id=notes["id"], notes_name=notes["name"],
             context_doc_ids=tuple(item["id"] for item in candidates),
-        ))
+        )
+        if not recording and not export_transcript(drive, meeting):
+            LOGGER.info("Waiting for a transcript or recording in folder %s", folder["id"])
+            continue
+        meetings.append(meeting)
     return meetings
 
 

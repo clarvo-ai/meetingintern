@@ -62,7 +62,8 @@ class MeetingDiscoveryTests(unittest.TestCase):
     def test_transcript_only_waits_one_hour_and_keeps_identity_when_video_arrives(self):
         notes = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "notes", 61)
         folder = {"id": "folder", "name": "Test"}
-        with patch("audio_archive.list_children", return_value=[notes]):
+        with patch("audio_archive.list_children", return_value=[notes]), \
+             patch("audio_archive.export_transcript", return_value="Ready transcript"):
             fallback = find_meetings(None, folder)
         self.assertEqual(len(fallback), 1)
         self.assertIsNone(fallback[0].recording_id)
@@ -80,6 +81,10 @@ class MeetingDiscoveryTests(unittest.TestCase):
         old_created = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "editing", 90)
         old_created["modifiedTime"] = recent["modifiedTime"]
         with patch("audio_archive.list_children", return_value=[old_created]):
+            self.assertEqual(find_meetings(None, folder), [])
+
+        with patch("audio_archive.list_children", return_value=[notes]), \
+             patch("audio_archive.export_transcript", return_value=""):
             self.assertEqual(find_meetings(None, folder), [])
 
     def test_new_recording_blocks_transcript_fallback_until_settled(self):
