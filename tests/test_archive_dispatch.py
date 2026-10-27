@@ -5,6 +5,7 @@ from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
 from archive_checker import check_once, dispatch_analysis_jobs
+from archive_job import work_once as archive_work_once
 from analysis_state import AnalysisState
 from archive_state import ArchiveState
 from audio_archive import FOLDER_MIME, Meeting
@@ -96,6 +97,29 @@ class DispatchTests(unittest.TestCase):
                                 launch=launch)
         self.assertEqual(result["dispatched_count"], 1)
         launch.assert_called_once_with("job", "key")
+
+    def test_archive_worker_recovers_when_drive_changes_computed_source_key(self):
+        meeting = Meeting(
+            source_key="new-key", folder_id="folder", folder_name="Test",
+            recording_id=None, recording_name=None, duration_seconds=None,
+            notes_id="source-doc", notes_name="Transcript",
+            context_doc_ids=("source-doc",),
+        )
+        state = Mock()
+        state.claim_for_work.return_value = {
+            "meeting_folder_id": "folder", "source_notes_id": "source-doc",
+            "source_context_doc_ids": ["source-doc"],
+        }
+        drive = Mock()
+        drive.files.return_value.get.return_value.execute.return_value = {"id": "folder"}
+        with patch("archive_job.build", return_value=drive), \
+             patch("archive_job.find_meetings", return_value=[meeting]), \
+             patch("archive_job.existing_archive_doc_id", return_value=None), \
+             patch("archive_job.process_meeting", return_value="output-doc") as process:
+            result = archive_work_once("old-key", "destination", "key", state, Mock())
+        self.assertEqual(result, "output-doc")
+        process.assert_called_once()
+        state.mark_done.assert_called_once_with("old-key", "output-doc")
 
     def test_analysis_claim_blocks_duplicate_dispatch_and_worker(self):
         state = AnalysisState.__new__(AnalysisState)
