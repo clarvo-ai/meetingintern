@@ -9,6 +9,9 @@ from googleapiclient.discovery import build
 
 from analysis_state import AnalysisState
 from audio_archive import drive_credentials, person_context
+from meeting_evidence import (archived_speech_body, calendar_client,
+                              calendar_invitees, parse_meet_documents,
+                              parse_team_roster, source_evidence)
 from meeting_analysis import (analyze_transcript, create_or_find_brief,
                               format_chat_message, post_chat_message,
                               ChatDeliveryRejected, ChatDeliveryUncertain)
@@ -18,7 +21,7 @@ LOGGER = logging.getLogger(__name__)
 
 
 def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
-              model="gemini-3.5-flash-lite"):
+              model="gemini-3.5-flash-lite", roster=None, calendar_ids=(), calendar=None):
     """Resume from a saved brief if a previous execution stopped before Chat."""
     data = state.claim_for_work(source_key)
     if not data:
@@ -37,18 +40,34 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
         payload = data.get("analysis_payload")
         if not payload:
             raw = drive.files().export(fileId=transcript_doc_id, mimeType="text/plain").execute()
-            transcript = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+            archived = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
+            transcript = archived_speech_body(archived)
+            speech = parse_meet_documents([("English Transcript", transcript)])
+            if speech["source_speech_words"] < 3:
+                state.mark_invalid_source(source_key, "Archived transcript contains no spoken words")
+                LOGGER.warning("Skipping analysis %s: archived transcript has no speech", source_key)
+                return None
             notes_id = data.get("source_notes_id")
+            source_ids = list(dict.fromkeys([notes_id, *(data.get("source_context_doc_ids") or [])]))
+            source_ids = [doc_id for doc_id in source_ids if doc_id]
             hints = ""
+            evidence = {"speakers": [], "speaker_turns": {}, "attendees_in_meet_doc": [],
+                        "source_speech_words": 0, "source_doc_created_at": None}
             if notes_id:
                 try:
+                    evidence = source_evidence(drive, source_ids)
                     hints = person_context(drive, SimpleNamespace(
                         notes_id=notes_id,
-                        context_doc_ids=tuple(data.get("source_context_doc_ids") or (notes_id,)),
+                        context_doc_ids=tuple(source_ids),
                     ))
                 except Exception:
-                    LOGGER.warning("Could not read attendee hints for %s", source_key)
-            payload = analyze_transcript(api_key, title, transcript, hints, model)
+                    LOGGER.warning("Could not read Meet identity evidence for %s", source_key)
+            evidence["archived_speech_words"] = speech["source_speech_words"]
+            evidence.update(calendar_invitees(
+                calendar, calendar_ids, source_ids, evidence.get("source_doc_created_at"),
+            ))
+            payload = analyze_transcript(api_key, title, transcript, hints, model,
+                                         evidence=evidence, roster=roster or {})
         brief_doc_id = data.get("analysis_brief_doc_id") or create_or_find_brief(
             drive, docs, item["parents"][0], source_key,
             transcript_doc_id, title, payload,
@@ -88,8 +107,12 @@ def main():
     credentials = drive_credentials()
     drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
     docs = build("docs", "v1", credentials=credentials, cache_discovery=False)
+    roster = parse_team_roster(os.getenv("MEETING_TEAM_ROSTER_JSON"))
+    calendar_ids = tuple(item.strip() for item in os.getenv("MEETING_CALENDAR_IDS", "").split(",")
+                         if item.strip())
     work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
-              os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
+              os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"), roster,
+              calendar_ids, calendar_client(calendar_ids))
 
 
 if __name__ == "__main__":
