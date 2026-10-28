@@ -90,6 +90,30 @@ class ReportV2Tests(unittest.TestCase):
         self.assertLess(text.index("/full-doc/"), text.index("/brief-doc/"))
         self.assertNotIn("*Type:*", text)
 
+    def test_calendar_link_follows_transcript_and_header_has_time_topics_people(self):
+        payload = {"headline": "Demo", "meeting_type": "prospect_sales_demo",
+                   "classification_confidence": "high", "topic_tags": ["sales", "other"],
+                   "meeting_evidence": {"type_supported": True,
+                       "calendar_match": "matched", "calendar_event": {
+                           "start": "2026-10-27T10:00:00+02:00",
+                           "event_url": "https://calendar.google.com/event/demo",
+                           "invitees": [{"email": "luukas.lavanti@brightlyworks.com",
+                                         "response_status": "needsAction"}]},
+                       "confirmed_meet_participants": [
+                           {"display_name": "Luukas", "identity_kind": "anonymous"}]},
+                   "verified_companies": [{"name": "Brightly",
+                                          "matched_domains": ["brightlyworks.com"]}],
+                   "overview": [], "discussion_sections": [], "decisions": [],
+                   "open_questions": [], "next_steps": [], "questions_and_answers": []}
+        text = format_report_chat(payload, "full-doc", "brief-doc")
+        self.assertIn("Prospect sales or demo · #sales", text)
+        self.assertNotIn("#other", text)
+        self.assertIn("2026/10/27 10:00 EET", text)
+        self.assertIn("Brightly (brightlyworks.com)", text)
+        self.assertIn("Luukas Lavanti <luukas.lavanti@brightlyworks.com>", text)
+        self.assertLess(text.index("/full-doc/"), text.index("calendar.google.com"))
+        self.assertLess(text.index("calendar.google.com"), text.index("/brief-doc/"))
+
 
 if __name__ == "__main__":
     unittest.main()

@@ -153,7 +153,7 @@ class BriefTests(unittest.TestCase):
             "id": "transcript", "name": "Team planning - English Transcript",
             "parents": ["shared-folder"],
         }
-        with patch("analysis_job.analyze_transcript") as analyze, \
+        with patch("analysis_job.generate_report") as analyze, \
              patch("analysis_job.create_or_find_brief") as create, \
              patch("analysis_job.post_chat_message", return_value="message") as post:
             result = work_once("source-key", state, drive, Mock(), "key", "webhook", "MEETINGS")
@@ -163,6 +163,36 @@ class BriefTests(unittest.TestCase):
         post.assert_called_once_with("webhook", "MEETINGS", "source-key", "saved message")
         state.mark_sending.assert_called_once_with("source-key")
         state.mark_posted.assert_called_once_with("source-key", "message")
+
+    def test_worker_uses_full_report_for_new_analysis(self):
+        state = Mock()
+        state.claim_for_work.return_value = {"output_doc_id": "transcript"}
+        drive = Mock()
+        drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "transcript", "name": "Planning - English Transcript",
+            "parents": ["shared-folder"],
+        }
+        drive.files.return_value.export.return_value.execute.return_value = (
+            b"Planning - English Transcript\nMethod: Meet transcript\n\n"
+            b"Juha Lehto: We should review the plan.\n"
+            b"Robert Holmberg: Yes, let's do that."
+        )
+        report = {"headline": "Planning update", "meeting_type": "unknown",
+                  "classification_confidence": "low", "topic_tags": ["operations"],
+                  "meeting_evidence": {}, "verified_companies": [],
+                  "overview": ["The plan was discussed."], "discussion_sections": [],
+                  "questions_and_answers": [], "next_steps": [], "open_questions": []}
+        with patch("analysis_job.generate_report", return_value=report) as generate, \
+             patch("analysis_job.create_or_find_brief", return_value="brief") as create, \
+             patch("analysis_job.post_chat_message", return_value="message") as post:
+            result = work_once("source-key", state, drive, Mock(), "key", "webhook",
+                               "MEETINGS", company_references=[{"name": "Example"}])
+        self.assertEqual(result, "brief")
+        self.assertEqual(generate.call_args.args[0], "key")
+        self.assertEqual(generate.call_args.args[-1], [{"name": "Example"}])
+        self.assertEqual(create.call_args.kwargs["schema_version"], "2")
+        self.assertIn("Full transcript", post.call_args.args[-1])
+        self.assertIn("#operations", post.call_args.args[-1])
 
     def test_uncertain_chat_delivery_is_not_retried(self):
         from meeting_analysis import ChatDeliveryUncertain
@@ -194,7 +224,7 @@ class BriefTests(unittest.TestCase):
             b"Demo - English Transcript\nMethod: Meet transcript\n\n"
             b"Demo - Transcript\nTranscription ended after 00:00:09\n"
         )
-        with patch("analysis_job.analyze_transcript") as analyze, \
+        with patch("analysis_job.generate_report") as analyze, \
              patch("analysis_job.post_chat_message") as post:
             result = work_once("source-key", state, drive, Mock(), "key", "webhook", "MEETINGS")
         self.assertIsNone(result)

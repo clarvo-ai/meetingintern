@@ -10,8 +10,10 @@ from google import genai
 from google.genai import types
 from pydantic import BaseModel, Field
 
+from company_reference import normalize_report_names
 from meeting_analysis import MEETING_TYPE, TOPIC_TAG, TYPE_LABELS
 from meeting_evidence import apply_classification_evidence
+from meeting_report_context import company_line, meeting_time, people_line
 
 
 class DiscussionSection(BaseModel):
@@ -144,7 +146,8 @@ def _action_cues(transcript):
     return cues[:160]
 
 
-def generate_report(api_key, transcript, evidence, roster, model="gemini-3.5-flash-lite"):
+def generate_report(api_key, transcript, evidence, roster, model="gemini-3.5-flash-lite",
+                    company_references=None):
     """Focused calls each see all spoken content, without summary chunking."""
     if not transcript.strip():
         raise ValueError("Cannot report on an empty transcript")
@@ -297,6 +300,8 @@ def generate_report(api_key, transcript, evidence, roster, model="gemini-3.5-fla
     report = _clean_report(report, spoken_transcript, evidence)
     payload = report.model_dump()
     payload = _correct_clarvo_spelling(payload)
+    payload = normalize_report_names(payload, spoken_transcript, evidence,
+                                     company_references or [])
     return apply_classification_evidence(payload, evidence, roster)
 
 
@@ -314,19 +319,6 @@ def _published_type(payload):
     return (payload["meeting_type"] != "unknown"
             and payload["classification_confidence"] == "high"
             and payload.get("meeting_evidence", {}).get("type_supported") is True)
-
-
-def _participant_line(evidence):
-    people = evidence.get("confirmed_meet_participants") or []
-    if not people:
-        return None
-    labels = []
-    for person in people:
-        name = person.get("display_name") or "Unnamed"
-        if person.get("identity_kind") != "signed_in":
-            name += " (name unverified)"
-        labels.append(name)
-    return "👥 Joined: " + ", ".join(labels)
 
 
 def _group_next_steps(steps):
@@ -351,7 +343,7 @@ def _step_text(step):
     return f"• {step['action']} — {'; '.join(details)}"
 
 
-def format_report_chat(payload, transcript_doc_id, brief_doc_id):
+def format_report_chat(payload, transcript_doc_id, brief_doc_id, roster=None):
     """Readable Chat preview with the transcript as its first link."""
     evidence = payload.get("meeting_evidence") or {}
     heading = payload["headline"].strip() or "Meeting update"
@@ -359,11 +351,25 @@ def format_report_chat(payload, transcript_doc_id, brief_doc_id):
     context = []
     if _published_type(payload):
         context.append(TYPE_LABELS[payload["meeting_type"]])
+    context.extend("#" + tag.replace("_", "-") for tag in payload.get("topic_tags", [])
+                   if tag != "other")
+    context = context[:5 if _published_type(payload) else 4]
     if context:
         lines.append("🧭 " + " · ".join(context))
-    people = _participant_line(evidence)
+    when = meeting_time(evidence)
+    if when:
+        lines.append("🕒 " + when)
+    company = company_line(evidence, payload.get("verified_companies") or [], roster or {})
+    if company:
+        lines.append(company)
+    people = people_line(evidence, roster or {})
     if people:
         lines.append(people)
+    # Keep the full transcript as the first URL so Chat previews the source Doc.
+    lines.append(f"📜 Full transcript: https://docs.google.com/document/d/{transcript_doc_id}/edit")
+    event = evidence.get("calendar_event") if evidence.get("calendar_match") == "matched" else None
+    if event and event.get("event_url"):
+        lines.append(f"🗓 Calendar event: {event['event_url']}")
     if payload.get("overview"):
         lines.extend(["", "*📝 In brief*"])
         lines.extend(f"• {point}" for point in payload["overview"])
@@ -393,15 +399,14 @@ def format_report_chat(payload, transcript_doc_id, brief_doc_id):
             lines.extend(_step_text(step) for step in steps)
     else:
         lines.append("• No concrete next steps captured")
-    lines.extend(["", f"📜 Full transcript: https://docs.google.com/document/d/{transcript_doc_id}/edit"])
     if brief_doc_id:
-        lines.append(f"📄 Companion brief: https://docs.google.com/document/d/{brief_doc_id}/edit")
+        lines.extend(["", f"📄 Companion brief: https://docs.google.com/document/d/{brief_doc_id}/edit"])
     return "\n".join(lines)
 
 
-def format_report_brief(payload, transcript_doc_id):
+def format_report_brief(payload, transcript_doc_id, roster=None):
     """Local companion preview retains source evidence and full report text."""
-    text = format_report_chat(payload, transcript_doc_id, None)
+    text = format_report_chat(payload, transcript_doc_id, None, roster)
     evidence = payload.get("meeting_evidence") or {}
     appendix = ["", "Evidence context (not speaker attribution)"]
     event = evidence.get("calendar_event") or {}

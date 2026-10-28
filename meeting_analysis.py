@@ -470,7 +470,7 @@ def format_brief(title, transcript_doc_id, payload):
 
 
 def create_or_find_brief(drive, docs, folder_id, source_key, transcript_doc_id,
-                         title, payload):
+                         title, payload, formatter=None, schema_version="1"):
     """Recover a brief after a worker crash instead of creating a duplicate."""
     query = (
         f"'{folder_id}' in parents and trashed = false and "
@@ -496,7 +496,7 @@ def create_or_find_brief(drive, docs, folder_id, source_key, transcript_doc_id,
                 "properties": {
                     "analysis_source_key": source_key,
                     "source_transcript_id": transcript_doc_id,
-                    "analysis_schema_version": "1",
+                    "analysis_schema_version": schema_version,
                 },
             },
             fields="id", supportsAllDrives=True,
@@ -506,7 +506,8 @@ def create_or_find_brief(drive, docs, folder_id, source_key, transcript_doc_id,
         docs.documents().batchUpdate(
             documentId=doc_id,
             body={"requests": [{"insertText": {"location": {"index": 1},
-                                               "text": format_brief(title, transcript_doc_id, payload)}}]},
+                                               "text": (formatter or format_brief)(
+                                                   title, transcript_doc_id, payload)}}]},
         ).execute()
     except Exception:
         if not existing:

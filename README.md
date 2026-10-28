@@ -55,23 +55,26 @@ organizer and Chat summary pipeline configured separately.
 When an archive job publishes a full English transcript, it marks that meeting
 ready for a separate analysis job. The 15-minute checker dispatches analysis
 jobs independently, so a summary or Chat failure never reruns audio extraction.
-The analysis job reads the full archived transcript, uses Gemini
-`gemini-3.5-flash-lite` to choose one relationship-based meeting type and several
-topic tags, and creates a companion `Meeting Brief` Doc in the same shared
-folder. The transcript Doc stays untouched. Firestore stores the type, tags,
-brief ID, and delivery status for later reporting and safe retries.
-For customer conversations, the brief keeps customer needs and current context,
-buying considerations, seller claims, and the actual commercial status in
-separate sections. It uses a quote-checked evidence inventory for moderate
-transcripts and a direct synthesis pass for long transcripts. The Chat update
-includes the most important points from those sections. For moderate-length
-meetings, customer sections use only customer-attributed points with quotes
-that appear in the source transcript.
+The analysis job reads the full archived transcript and uses Gemini
+`gemini-3.5-flash-lite` in focused passes for questions and replies, discussed
+next steps, and a detailed narrative. Every pass receives the complete spoken
+transcript; audio chunking remains an earlier, separate step. The report pairs
+external questions with Clarvo's actual answer or an open status. Agreed,
+proposed, and unclear next steps remain labeled as meeting notes to verify.
+An individual owner is only used when the original Meet transcript provides a
+named speaker and the discussion supports the assignment. The job creates a
+companion `Meeting Brief` Doc in the same shared folder; the full English
+transcript Doc stays untouched. Firestore stores the type, tags, brief ID, and
+delivery status for later reporting and safe retries.
 
-The brief separates decisions and agreed actions from suggested follow-ups.
-An action is treated as agreed only when a supporting excerpt explicitly
-commits someone to it. The job posts one concise update with links to the brief
-and transcript to a configured Google Chat space. Google Chat incoming webhooks
+The Chat header combines confirmed Meet joiners with matched Calendar invitees
+by unambiguous name or email matches. Anonymous first-name matches to an
+invitee email are marked as likely and unverified; invitation response status
+never establishes attendance. The header keeps the meeting type when supported,
+topic tags, Finland-local meeting time, relevant company context, and a matched
+Calendar event link. The full transcript is the first URL for the Chat preview,
+followed by the event and companion brief. The job posts one update to the
+configured Google Chat space. Google Chat incoming webhooks
 do not support idempotent request IDs, so a send with an uncertain result is
 held for manual reconciliation rather than retried into a possible duplicate.
 Customer demo search links and the representative's own feedback are outside
@@ -91,6 +94,15 @@ establish attendance or a meeting type. Other external types require high model
 confidence and a named outside speaker, explicit Meet Doc attendee, or signed-in
 Meet joiner. The Chat update and brief omit uncertain types and the `other` topic
 tag; they label each evidence source separately.
+
+`MEETING_COMPANY_REFERENCE_JSON` is an optional JSON array of verified display
+names, phonetic aliases, and company domains, for example
+`[{"name":"Example Ltd","aliases":["Exampl"],"domains":["example.fi"]}]`.
+Names are corrected in generated prose only when an alias occurs in the spoken
+transcript or the domain exactly matches a matched Calendar invitee. Keep this
+reference current from a trusted company directory; an unknown name is left
+uncorrected rather than guessed. Original transcripts and raw evidence stay
+unchanged.
 
 `MEETING_CALENDAR_IDS` is an optional comma-separated list of calendars readable
 by the analysis job's service account. Calendar events are matched by exact
