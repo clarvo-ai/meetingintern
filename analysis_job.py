@@ -9,7 +9,8 @@ from googleapiclient.discovery import build
 from analysis_state import AnalysisState
 from audio_archive import drive_credentials
 from meeting_evidence import (archived_speech_body, calendar_client,
-                              calendar_context, parse_meet_documents,
+                              calendar_context, meet_client_for_user,
+                              meet_participant_context, parse_meet_documents,
                               parse_team_roster, resolve_speaker_identities,
                               source_evidence)
 from meeting_analysis import (analyze_transcript, create_or_find_brief,
@@ -21,7 +22,8 @@ LOGGER = logging.getLogger(__name__)
 
 
 def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
-              model="gemini-3.5-flash-lite", roster=None, calendar_ids=(), calendar=None):
+              model="gemini-3.5-flash-lite", roster=None, calendar_ids=(), calendar=None,
+              meet_factory=None):
     """Resume from a saved brief if a previous execution stopped before Chat."""
     data = state.claim_for_work(source_key)
     if not data:
@@ -67,17 +69,22 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
                     LOGGER.warning("Could not read Meet identity evidence for %s", source_key)
             evidence["archived_speech_words"] = speech["source_speech_words"]
             evidence.update(calendar_context(calendar, calendar_ids, evidence))
+            evidence.update(meet_participant_context(meet_factory, evidence, calendar_ids))
             evidence.update(resolve_speaker_identities(evidence, roster or {}))
             event = evidence.get("calendar_event") or {}
             calendar_hints = ", ".join(
-                f"{person['name']} <{person['email']}>" if person.get("name") else person["email"]
-                for person in event.get("invitees", [])
+                person["name"] for person in event.get("invitees", []) if person.get("name")
+            )
+            confirmed_joiners = ", ".join(
+                f"{person.get('display_name') or 'unnamed'} ({person['identity_kind']})"
+                for person in evidence.get("confirmed_meet_participants", [])
             )
             # A filename with names does not establish which person represented which side.
             analysis_title = title if hints else "Meeting recording"
             payload = analyze_transcript(api_key, analysis_title, transcript, hints, model,
                                          evidence=evidence, roster=roster or {},
-                                         calendar_hints=calendar_hints)
+                                         calendar_hints=calendar_hints,
+                                         confirmed_joiners=confirmed_joiners)
         brief_doc_id = data.get("analysis_brief_doc_id") or create_or_find_brief(
             drive, docs, item["parents"][0], source_key,
             transcript_doc_id, title, payload,
@@ -120,9 +127,11 @@ def main():
     roster = parse_team_roster(os.getenv("MEETING_TEAM_ROSTER_JSON"))
     calendar_ids = tuple(item.strip() for item in os.getenv("MEETING_CALENDAR_IDS", "").split(",")
                          if item.strip())
+    service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
+    meet_factory = (lambda user: meet_client_for_user(service_account_email, user)) if service_account_email else None
     work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
               os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"), roster,
-              calendar_ids, calendar_client(calendar_ids))
+              calendar_ids, calendar_client(calendar_ids), meet_factory)
 
 
 if __name__ == "__main__":
