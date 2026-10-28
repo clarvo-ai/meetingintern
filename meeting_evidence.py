@@ -8,12 +8,14 @@ from datetime import datetime, timedelta, timezone
 from urllib.parse import urlparse
 
 import google.auth
+from google.auth import impersonated_credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
 
 LOGGER = logging.getLogger(__name__)
 CALENDAR_SCOPE = "https://www.googleapis.com/auth/calendar.events.readonly"
+MEET_SCOPE = "https://www.googleapis.com/auth/meetings.space.readonly"
 TRANSCRIPT_HEADING = re.compile(r"(?im)^.*? - Transcript\s*$")
 SPEAKER_LINE = re.compile(r"^([^:\r\n]{2,70}):[ \t]+(.+)$")
 TIMESTAMP = re.compile(r"^\d{1,2}:\d{2}(?::\d{2})?$", re.I)
@@ -23,6 +25,7 @@ SOURCE_TIME = re.compile(
     r"(EEST|EET|GMT[+-]\d{1,2}|UTC[+-]\d{1,2})\b", re.I,
 )
 CODE_TIME_TOLERANCE = timedelta(minutes=90)
+MEET_SOURCE_TIME_TOLERANCE = timedelta(minutes=15)
 
 
 def parse_team_roster(raw):
@@ -243,12 +246,134 @@ def resolve_speaker_identities(evidence, roster):
     for invitee in event.get("invitees", []):
         if invitee.get("name"):
             people.setdefault(_name_key(invitee["name"]), set()).add(invitee["email"])
+    meet_people = {}
+    for participant in evidence.get("confirmed_meet_participants", []):
+        if participant.get("identity_kind") == "signed_in" and participant.get("display_name"):
+            meet_people.setdefault(_name_key(participant["display_name"]), set()).add(
+                participant["user_id"])
     resolved = []
     for speaker in evidence.get("speakers", []):
         emails = people.get(_name_key(speaker), set())
-        if len(emails) == 1:
-            resolved.append({"speaker": speaker, "email": next(iter(emails))})
+        users = meet_people.get(_name_key(speaker), set())
+        if len(emails) <= 1 and len(users) <= 1 and (emails or users):
+            person = {"speaker": speaker}
+            if emails:
+                person["email"] = next(iter(emails))
+            if users:
+                person["meet_user_id"] = next(iter(users))
+            resolved.append(person)
     return {"resolved_speakers": resolved}
+
+
+def meet_client_for_user(service_account_email, user_email, source_credentials=None):
+    """Use keyless domain-wide delegation for the one known source owner."""
+    source = source_credentials or google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"])[0]
+    credentials = impersonated_credentials.Credentials(
+        source_credentials=source,
+        target_principal=service_account_email,
+        target_scopes=[MEET_SCOPE],
+        subject=user_email,
+    )
+    return build("meet", "v2", credentials=credentials, cache_discovery=False)
+
+
+def _meet_pages(request_factory, key):
+    """Consume every page so a partial API response cannot establish attendance."""
+    items = []
+    page_token = None
+    while True:
+        response = request_factory(page_token).execute()
+        items.extend(response.get(key, []))
+        page_token = response.get("nextPageToken")
+        if not page_token:
+            return items
+
+
+def _meet_anchor(evidence):
+    times = [datetime.fromisoformat(item["meeting_at"])
+             for item in evidence.get("source_artifacts", []) if item.get("meeting_at")]
+    if times:
+        return times[0], MEET_SOURCE_TIME_TOLERANCE
+    event = evidence.get("calendar_event") or {}
+    if event.get("start"):
+        return datetime.fromisoformat(event["start"].replace("Z", "+00:00")), CODE_TIME_TOLERANCE
+    return None, None
+
+
+def meet_participant_context(meet_factory, evidence, allowed_user_emails):
+    """Match one conference by recording ID or code plus time before trusting joiners."""
+    empty = {"meet_participant_record_status": "unavailable",
+             "meet_conference_record": None, "meet_record_match_basis": None,
+             "confirmed_meet_participants": []}
+    if not meet_factory:
+        return empty
+    artifacts = evidence.get("source_artifacts") or []
+    owners = {email for item in artifacts for email in item.get("owner_emails", [])}
+    event = evidence.get("calendar_event") if evidence.get("calendar_match") == "matched" else None
+    user = (event or {}).get("organizer_email")
+    allowed = {email.casefold() for email in allowed_user_emails}
+    if user not in owners or user not in allowed:
+        users = owners.intersection(allowed)
+        user = next(iter(users)) if len(users) == 1 else None
+    codes = {code for item in artifacts for code in item.get("meet_codes", [])}
+    if event and event.get("meet_code"):
+        codes.add(event["meet_code"])
+    if not user or len(codes) != 1:
+        return empty
+    code = next(iter(codes))
+    recording_ids = {item["id"] for item in artifacts if item.get("mime_type", "").startswith("video/")}
+    anchor, tolerance = _meet_anchor(evidence)
+    try:
+        meet = meet_factory(user)
+        records = _meet_pages(
+            lambda token: meet.conferenceRecords().list(
+                filter=f'space.meeting_code = "{code}"', pageSize=250,
+                pageToken=token), "conferenceRecords")
+        exact = []
+        if recording_ids:
+            for record in records:
+                recordings = _meet_pages(
+                    lambda token: meet.conferenceRecords().recordings().list(
+                        parent=record["name"], pageSize=100, pageToken=token), "recordings")
+                if recording_ids.intersection(
+                    item.get("driveDestination", {}).get("file") for item in recordings):
+                    exact.append(record)
+        basis = "recording_id" if exact else "meet_code_time"
+        candidates = exact or [
+            record for record in records
+            if anchor and abs(datetime.fromisoformat(record["startTime"].replace("Z", "+00:00"))
+                              - anchor) <= tolerance
+        ]
+        if len(candidates) > 1:
+            return {**empty, "meet_participant_record_status": "ambiguous"}
+        if not candidates:
+            return {**empty, "meet_participant_record_status": "not_found"}
+        record = candidates[0]
+        raw = _meet_pages(
+            lambda token: meet.conferenceRecords().participants().list(
+                parent=record["name"], pageSize=250, pageToken=token), "participants")
+    except Exception as error:
+        LOGGER.warning("Meet participant evidence unavailable for %s: %s", user, type(error).__name__)
+        return empty
+    participants = []
+    for item in raw:
+        signed = item.get("signedinUser") or {}
+        anonymous = item.get("anonymousUser") or {}
+        phone = item.get("phoneUser") or {}
+        kind = "signed_in" if signed else "anonymous" if anonymous else "phone" if phone else "unknown"
+        identity = signed or anonymous or phone
+        participants.append({
+            "display_name": identity.get("displayName"),
+            "identity_kind": kind,
+            "user_id": signed.get("user"),
+            "joined_at": item.get("earliestStartTime"),
+            "left_at": item.get("latestEndTime"),
+        })
+    return {"meet_participant_record_status": "matched",
+            "meet_conference_record": record["name"],
+            "meet_record_match_basis": basis,
+            "confirmed_meet_participants": participants}
 
 
 def calendar_context(calendar, calendar_ids, evidence):
@@ -354,6 +479,13 @@ def apply_classification_evidence(payload, evidence, roster):
     speakers = evidence.get("speakers", [])
     doc_attendees = evidence.get("attendees_in_meet_doc", [])
     invitees = evidence.get("calendar_invitees", [])
+    participants = evidence.get("confirmed_meet_participants", [])
+    signed_participants = [item["display_name"] for item in participants
+                           if item.get("identity_kind") == "signed_in" and item.get("display_name")]
+    outside_joiners = [name for name in signed_participants
+                       if _name_key(name) not in names and len(name.split()) >= 2]
+    all_joiners_known_team = (bool(participants) and len(signed_participants) == len(participants)
+                              and all(_name_key(name) in names for name in signed_participants))
     known_speakers = [name for name in speakers if _name_key(name) in names]
     nonteam_speakers = [name for name in speakers if _name_key(name) not in names]
     nonteam_attendees = [name for name in doc_attendees if _name_key(name) not in names]
@@ -361,13 +493,14 @@ def apply_classification_evidence(payload, evidence, roster):
     named_outsiders = [name for name in [*nonteam_speakers, *nonteam_attendees]
                       if len(name.split()) >= 2 and not re.match(r"(?i)^(speaker|person|participant)\s+\d+$", name)]
     substantial = evidence.get("archived_speech_words", 0) >= 50
-    team_supported = (
-        bool(roster) and substantial and len(known_speakers) >= 2
-        and sum(evidence.get("speaker_turns", {}).values()) >= 5
-        and not nonteam_speakers and not nonteam_attendees and not outside_invitees
+    team_supported = bool(roster) and substantial and not nonteam_speakers and not nonteam_attendees and (
+        (all_joiners_known_team and len(signed_participants) >= 2)
+        or (not participants and len(known_speakers) >= 2
+            and sum(evidence.get("speaker_turns", {}).values()) >= 5
+            and not outside_invitees)
     )
-    # An invitation may be a no-show; it only vetoes a team label.
-    outside_supported = bool(roster) and substantial and bool(named_outsiders)
+    # Confirmed joiners outrank invitations; an external invitee may not have joined.
+    outside_supported = bool(roster) and substantial and bool([*named_outsiders, *outside_joiners])
     if proposed == "team_internal" and team_supported:
         result["classification_confidence"] = "high"
         result["meeting_evidence"]["type_supported"] = True

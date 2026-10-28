@@ -83,22 +83,34 @@ notes as proof of attendance. The current team roster is supplied as
 `MEETING_TEAM_ROSTER_JSON`, a JSON array of `{"name":"Full Name","email":"name@clarvo.ai"}`
 objects. For the current team, set it to Juha Lehto, Robert Holmberg, Mark
 Szucs, and Miro Keimiöniemi with their `@clarvo.ai` emails. Keep the roster
-current when team membership changes. With no roster, it safely omits meeting types. A team meeting needs
-substantial speech, at least two distinct rostered speakers, and no observed
-outside speaker, Meet Doc attendee, or Calendar invitee. Other types need high
-model confidence and a named outside speaker or Meet Doc attendee; an invitee
-alone cannot establish who joined. The Chat update and brief
-omit uncertain types and the `other` topic tag; the brief identifies speaker
-labels and Calendar invitees separately.
+current when team membership changes. With no roster, it safely omits meeting
+types. A team meeting needs substantial speech and either at least two rostered
+transcript speakers without outside evidence, or at least two confirmed rostered
+Meet joiners with no unknown joiners. An outside Calendar invitee alone cannot
+establish attendance or a meeting type. Other external types require high model
+confidence and a named outside speaker, explicit Meet Doc attendee, or signed-in
+Meet joiner. The Chat update and brief omit uncertain types and the `other` topic
+tag; they label each evidence source separately.
 
 `MEETING_CALENDAR_IDS` is an optional comma-separated list of calendars readable
 by the analysis job's service account. Calendar events are matched by exact
-Meet Doc attachment ID within a one-day window, never by a similar title.
+source attachment ID first, then exact Meet code with time and organizer;
+similar titles never establish a match.
 Invitees are not proof of attendance. The code requests a Calendar read-only
 OAuth scope; enable the Calendar API and give the job's service account event
 read access to each calendar before enabling this variable. Calendar
 permission failures leave meeting types conservative and do not stop summaries.
-Actual Meet joiner records are not integrated yet.
+
+Set `MEETING_MEET_SERVICE_ACCOUNT_EMAIL` on the analysis job to enable confirmed
+Meet joiners. The Meet API must be enabled in the Cloud project. A Workspace
+super admin must authorize the service account's OAuth client ID for only
+`https://www.googleapis.com/auth/meetings.space.readonly` through domain-wide
+delegation. The service account needs `roles/iam.serviceAccountTokenCreator` on
+itself to sign short-lived delegated credentials without a key. The job only
+impersonates a source owner on `MEETING_CALENDAR_IDS`, matches a conference by
+exact recording Drive ID where available, and otherwise requires a unique Meet
+code and time match. Meet conference records expire 30 days after the call.
+Unavailable or ambiguous records do not block the rest of the analysis.
 
 Current roster value:
 

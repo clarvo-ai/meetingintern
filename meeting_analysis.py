@@ -253,7 +253,7 @@ def _ground_customer_sections(brief, inventory):
 
 def analyze_transcript(api_key, title, transcript, attendee_hints="",
                        model="gemini-3.5-flash-lite", evidence=None, roster=None,
-                       calendar_hints=""):
+                       calendar_hints="", confirmed_joiners=""):
     """Use a fixed schema so type, topics, and commitments stay distinct."""
     if not transcript.strip():
         raise ValueError("Cannot analyze an empty transcript")
@@ -333,6 +333,8 @@ def analyze_transcript(api_key, title, transcript, attendee_hints="",
         f"Attendee spelling hints (not proof of attendance): {attendee_hints}\n\n"
         f"Calendar invitee spelling and company hints (invitation is not attendance; "
         f"never infer speaker identity, role, or meeting type from these): {calendar_hints}\n\n"
+        f"Confirmed Meet joiners (proof of joining, not of speaking or role; "
+        f"anonymous display names are unverified identities): {confirmed_joiners}\n\n"
         f"Quote-checked evidence inventory:\n{json.dumps(inventory, ensure_ascii=False)}\n\n"
         f"Full English transcript:\n{transcript}"
     )
@@ -351,6 +353,10 @@ def analyze_transcript(api_key, title, transcript, attendee_hints="",
         raise RuntimeError("Meeting brief exceeded Gemini's output limit")
     parsed = response.parsed or json.loads(response.text or "")
     brief = MeetingBrief.model_validate(parsed)
+    # Event titles and invitee domains can suggest a company, but do not establish
+    # that the company named in a generated brief participated in the conversation.
+    if brief.counterparty and brief.counterparty.casefold() not in transcript.casefold():
+        brief.counterparty = None
     if brief.meeting_type == "unknown":
         brief.classification_confidence = "low"
     brief = _ground_customer_sections(brief, inventory)
@@ -405,6 +411,16 @@ def _event_context_lines(evidence):
     return lines
 
 
+def _meet_participant_label(person):
+    name = person.get("display_name") or "Unnamed participant"
+    kind = person.get("identity_kind")
+    if kind == "anonymous":
+        return f"{name} (anonymous display name; identity unverified)"
+    if kind == "phone":
+        return f"{name} (phone participant; identity unverified)"
+    return f"{name} (signed in)" if kind == "signed_in" else name
+
+
 def format_brief(title, transcript_doc_id, payload):
     """The brief is a separate, editable Doc; the transcript stays untouched."""
     transcript_url = f"https://docs.google.com/document/d/{transcript_doc_id}/edit"
@@ -420,15 +436,17 @@ def format_brief(title, transcript_doc_id, payload):
         header.append(f"Topic tags: {', '.join('#' + tag.replace('_', '-') for tag in tags)}")
     header.extend(_event_context_lines(evidence))
     if evidence.get("confirmed_meet_participants"):
-        header.append("Confirmed Meet participants: " + ", ".join(
-            person.get("email") or person.get("name") or "unknown"
-            for person in evidence["confirmed_meet_participants"]
-        ))
+        header.append("Confirmed Meet participants (joined): " + "; ".join(
+            _meet_participant_label(person) for person in evidence["confirmed_meet_participants"]))
+        if evidence.get("meet_conference_record"):
+            header.append("Meet conference record: " + evidence["meet_conference_record"])
     if evidence.get("speakers"):
         header.append(f"Named transcript speakers: {', '.join(evidence['speakers'])}")
     if evidence.get("resolved_speakers"):
         header.append("Unambiguous speaker identities: " + ", ".join(
-            f"{person['speaker']} <{person['email']}>" for person in evidence["resolved_speakers"]
+            f"{person['speaker']} <{person['email']}>" if person.get("email")
+            else f"{person['speaker']} (confirmed signed-in Meet account)"
+            for person in evidence["resolved_speakers"]
         ))
     if evidence.get("attendees_in_meet_doc"):
         header.append(f"Explicit Meet Doc attendee list: {', '.join(evidence['attendees_in_meet_doc'])}")
@@ -528,10 +546,8 @@ def format_chat_message(title, transcript_doc_id, brief_doc_id, payload):
         if event.get("event_url"):
             lines.append(f"*Event:* {event['event_url']}")
     if evidence.get("confirmed_meet_participants"):
-        lines.append("*Confirmed Meet participants:* " + ", ".join(
-            short(person.get("email") or person.get("name") or "unknown")
-            for person in evidence["confirmed_meet_participants"]
-        ))
+        lines.append("*Confirmed Meet participants (joined):* " + "; ".join(
+            short(_meet_participant_label(person)) for person in evidence["confirmed_meet_participants"]))
     if evidence.get("speakers"):
         lines.append("*Named transcript speakers:* " + ", ".join(
             short(speaker) for speaker in evidence["speakers"]

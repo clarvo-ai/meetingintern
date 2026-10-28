@@ -5,7 +5,8 @@ from unittest.mock import Mock
 
 from meeting_evidence import (apply_classification_evidence, archived_speech_body,
                               calendar_context, calendar_invitees, parse_meet_documents,
-                              parse_team_roster, resolve_speaker_identities)
+                              meet_participant_context, parse_team_roster,
+                              resolve_speaker_identities)
 from meeting_analysis import format_brief, format_chat_message
 
 
@@ -172,6 +173,62 @@ class EvidenceTests(unittest.TestCase):
                     ]}}
         self.assertEqual(resolve_speaker_identities(evidence, ROSTER)["resolved_speakers"],
                          [{"speaker": "Robert Holmberg", "email": "robert@clarvo.ai"}])
+
+    def test_meet_recording_id_selects_main_conference_over_reused_code(self):
+        meet = Mock()
+        records = [{"name": "conferenceRecords/short", "startTime": "2026-10-26T11:38:00Z"},
+                   {"name": "conferenceRecords/main", "startTime": "2026-10-26T10:31:00Z"}]
+        meet.conferenceRecords.return_value.list.return_value.execute.return_value = {
+            "conferenceRecords": records}
+        def recordings(**kwargs):
+            file_id = "recording" if kwargs["parent"] == "conferenceRecords/main" else "other"
+            return Mock(execute=lambda: {"recordings": [{"driveDestination": {"file": file_id}}]})
+        meet.conferenceRecords.return_value.recordings.return_value.list.side_effect = recordings
+        meet.conferenceRecords.return_value.participants.return_value.list.return_value.execute.return_value = {
+            "participants": [{"signedinUser": {"user": "users/123", "displayName": "Robert Holmberg"},
+                              "earliestStartTime": "2026-10-26T10:31:10Z"},
+                             {"anonymousUser": {"displayName": "Guest"}}]}
+        evidence = {"source_artifacts": [
+            {"id": "recording", "mime_type": "video/mp4", "meet_codes": ["vsw-jmey-fkr"],
+             "meeting_at": "2026-10-26T10:31:00+00:00", "owner_emails": ["robert@clarvo.ai"]}]}
+        found = meet_participant_context(lambda user: meet, evidence, ["robert@clarvo.ai"])
+        self.assertEqual(found["meet_conference_record"], "conferenceRecords/main")
+        self.assertEqual(found["meet_record_match_basis"], "recording_id")
+        self.assertEqual([item["identity_kind"] for item in found["confirmed_meet_participants"]],
+                         ["signed_in", "anonymous"])
+        self.assertIsNone(found["confirmed_meet_participants"][1]["user_id"])
+
+    def test_meet_requires_unique_time_match_when_recording_has_no_api_link(self):
+        meet = Mock()
+        meet.conferenceRecords.return_value.list.return_value.execute.return_value = {
+            "conferenceRecords": [
+                {"name": "conferenceRecords/one", "startTime": "2026-10-26T10:31:00Z"},
+                {"name": "conferenceRecords/two", "startTime": "2026-10-26T10:34:00Z"},
+            ]}
+        meet.conferenceRecords.return_value.recordings.return_value.list.return_value.execute.return_value = {
+            "recordings": []}
+        evidence = {"source_artifacts": [{"id": "notes", "mime_type": "application/vnd.google-apps.document",
+                                         "meet_codes": ["vsw-jmey-fkr"],
+                                         "meeting_at": "2026-10-26T10:31:00+00:00",
+                                         "owner_emails": ["robert@clarvo.ai"]}]}
+        result = meet_participant_context(lambda user: meet, evidence, ["robert@clarvo.ai"])
+        self.assertEqual(result["meet_participant_record_status"], "ambiguous")
+        self.assertEqual(result["confirmed_meet_participants"], [])
+
+    def test_confirmed_joiners_override_invitees_but_anonymous_name_is_not_identity(self):
+        evidence = parse_meet_documents([("Notes by Gemini", TEAM_TRANSCRIPT)])
+        evidence["archived_speech_words"] = 65
+        evidence["calendar_invitees"] = ["guest@example.com"]
+        evidence["confirmed_meet_participants"] = [
+            {"display_name": "Robert Holmberg", "identity_kind": "signed_in"},
+            {"display_name": "Juha Lehto", "identity_kind": "signed_in"},
+        ]
+        self.assertEqual(apply_classification_evidence(BASE, evidence, ROSTER)["meeting_type"],
+                         "team_internal")
+        evidence["confirmed_meet_participants"].append(
+            {"display_name": "Guest", "identity_kind": "anonymous"})
+        self.assertEqual(apply_classification_evidence(BASE, evidence, ROSTER)["meeting_type"],
+                         "unknown")
 
     def test_brief_separates_calendar_invitees_from_speakers(self):
         evidence = {"calendar_match": "matched", "calendar_event": {
