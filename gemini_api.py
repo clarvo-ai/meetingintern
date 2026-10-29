@@ -12,7 +12,7 @@ class GeminiAPI:
             raise ValueError("API key cannot be empty")
             
         self.api_key = api_key
-        self.model = os.getenv('GEMINI_MODEL', 'gemini-2.0-flash')
+        self.model = os.getenv('GEMINI_MODEL', 'gemini-3.5-flash-lite')
         self.base_url = f"https://generativelanguage.googleapis.com/v1/models/{self.model}:generateContent"
         self.requests_in_minute = 0
         self.last_request_time = time.time()
