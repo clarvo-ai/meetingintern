@@ -191,6 +191,18 @@ class ProcessingTests(unittest.TestCase):
         self.assertIn("recording unavailable after three hours", create.call_args.args[-1])
         gemini.detect_language.assert_not_called()
 
+    def test_direct_source_reads_as_owner_and_writes_with_company_drive(self):
+        company_drive = Mock()
+        source_drive = Mock()
+        with patch("audio_archive.export_transcript", return_value="Meet words") as export, \
+             patch("audio_archive.create_archive_doc", return_value="output") as create:
+            output = process_meeting(
+                company_drive, Mock(), Mock(), Mock(), "destination",
+                self.meeting(None), source_drive=source_drive)
+        self.assertEqual(output, "output")
+        export.assert_called_once_with(source_drive, self.meeting(None))
+        self.assertIs(create.call_args.args[0], company_drive)
+
     def test_finnish_audio_output_is_translated_before_archive(self):
         gemini = AudioGemini.__new__(AudioGemini)
         gemini._with_uploaded_audio = Mock(return_value="Tämä on suomenkielinen puhe.")

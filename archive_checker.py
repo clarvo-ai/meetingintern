@@ -5,6 +5,7 @@ import logging
 import os
 import re
 from datetime import datetime
+from itertools import chain
 
 import google.auth
 from flask import Flask, jsonify
@@ -14,7 +15,10 @@ from googleapiclient.discovery import build
 from analysis_state import AnalysisState
 from archive_state import ArchiveState
 from audio_archive import (drive_credentials, find_archived_recordings,
+                           owner_drive_credentials,
                            find_meetings_across_roots)
+from meet_archive_discovery import find_meet_meetings
+from meeting_evidence import meet_client_for_user
 from meeting_auto_artifacts import (calendar_client, calendar_ids,
                                     enable_upcoming_artifacts, meet_settings_client)
 
@@ -68,37 +72,42 @@ def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
 
 
 def check_once(roots, destination_folder_id, job_name, state, drive, dispatch_limit=5,
-               launch=launch_job, not_before=None):
-    """Pair artifacts inside each owner's root group before dispatching."""
+               launch=launch_job, not_before=None, direct_meetings=()):
+    """Prefer exact Meet artifact IDs, then scan shared source folders."""
     archived = find_archived_recordings(drive, destination_folder_id)
     dispatched = []
     ready_count = 0
     seen_docs = set()
     seen_recordings = set()
-    for group in roots:
-        root_ids = [group] if isinstance(group, str) else list(group)
-        for meeting in find_meetings_across_roots(drive, root_ids, not_before=not_before):
-            ready_count += 1
-            if (meeting.notes_id in seen_docs or
-                    (meeting.recording_id and meeting.recording_id in seen_recordings)):
-                continue
-            seen_docs.add(meeting.notes_id)
-            if meeting.recording_id:
-                seen_recordings.add(meeting.recording_id)
-            if (meeting.source_key in archived or meeting.notes_id in archived or
-                    meeting.recording_id in archived):
-                continue
-            if len(dispatched) >= dispatch_limit:
-                continue
-            if not state.reserve_for_dispatch(meeting, root_ids[0], root_ids=root_ids):
-                continue
-            try:
-                execution = launch(job_name, meeting.source_key)
-                state.mark_queued(meeting.source_key, execution)
-                dispatched.append(meeting.source_key)
-            except Exception as error:
-                state.mark_retry(meeting.source_key, error, "dispatching")
-                LOGGER.exception("Could not launch archive job for %s", meeting.source_key)
+    candidates = ((meeting, [meeting.folder_id]) for meeting in direct_meetings if meeting)
+
+    def folder_candidates():
+        for group in roots:
+            root_ids = [group] if isinstance(group, str) else list(group)
+            for meeting in find_meetings_across_roots(drive, root_ids, not_before=not_before):
+                yield meeting, root_ids
+    for meeting, root_ids in chain(candidates, folder_candidates()):
+        ready_count += 1
+        if (meeting.notes_id in seen_docs or
+                (meeting.recording_id and meeting.recording_id in seen_recordings)):
+            continue
+        seen_docs.add(meeting.notes_id)
+        if meeting.recording_id:
+            seen_recordings.add(meeting.recording_id)
+        if (meeting.source_key in archived or meeting.notes_id in archived or
+                meeting.recording_id in archived):
+            continue
+        if len(dispatched) >= dispatch_limit:
+            continue
+        if not state.reserve_for_dispatch(meeting, root_ids[0], root_ids=root_ids):
+            continue
+        try:
+            execution = launch(job_name, meeting.source_key)
+            state.mark_queued(meeting.source_key, execution)
+            dispatched.append(meeting.source_key)
+        except Exception as error:
+            state.mark_retry(meeting.source_key, error, "dispatching")
+            LOGGER.exception("Could not launch archive job for %s", meeting.source_key)
     return {"ready_count": ready_count, "dispatched_count": len(dispatched)}
 
 
@@ -157,11 +166,41 @@ def check_meetings():
     del credentials
     state = ArchiveState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
     drive = build("drive", "v3", credentials=drive_credentials(), cache_discovery=False)
+    direct_meetings = []
+    direct_errors = []
+    service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
+    calendar_raw = os.getenv("MEETING_CALENDAR_IDS")
+    if service_account_email and calendar_raw:
+        owners = calendar_ids(calendar_raw)
+        direct_start_raw = os.getenv("MEET_API_START_TIME")
+        direct_start = (datetime.fromisoformat(direct_start_raw.replace("Z", "+00:00"))
+                        if direct_start_raw else not_before)
+        if direct_start.tzinfo is None:
+            return jsonify({"error": "MEET_API_START_TIME must include a timezone"}), 500
+        source_drives = {}
+        def source_drive(owner):
+            if owner not in source_drives:
+                source_drives[owner] = build(
+                    "drive", "v3",
+                    credentials=owner_drive_credentials(service_account_email, owner),
+                    cache_discovery=False,
+                )
+            return source_drives[owner]
+        try:
+            direct_meetings = [meeting for meeting in find_meet_meetings(
+                lambda owner: meet_client_for_user(service_account_email, owner),
+                source_drive, owners, not_before=max(not_before, direct_start),
+                errors=direct_errors) if meeting]
+        except Exception:
+            LOGGER.exception("Meet API discovery failed; continuing with shared Drive folders")
+            direct_errors.append("unexpected")
     result = check_once(
         roots, destination, job_name, state, drive,
         dispatch_limit=int(os.getenv("ARCHIVE_DISPATCH_LIMIT", "5")),
         not_before=not_before,
+        direct_meetings=direct_meetings,
     )
+    result["meet_discovery_errors"] = len(direct_errors)
     analysis_job_name = os.getenv("ANALYSIS_JOB_NAME")
     if analysis_job_name:
         analysis_state = AnalysisState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
@@ -169,7 +208,7 @@ def check_meetings():
             analysis_state, analysis_job_name,
             dispatch_limit=int(os.getenv("ANALYSIS_DISPATCH_LIMIT", "5")),
         ))
-    return jsonify(result)
+    return jsonify(result), 502 if direct_errors else 200
 
 
 if __name__ == "__main__":

@@ -7,7 +7,7 @@ import google.auth
 from googleapiclient.discovery import build
 
 from analysis_state import AnalysisState
-from audio_archive import drive_credentials
+from audio_archive import drive_credentials, owner_drive_credentials
 from company_reference import parse_company_references
 from meeting_evidence import (archived_speech_body, calendar_client,
                               calendar_context, meet_client_for_user,
@@ -24,7 +24,7 @@ LOGGER = logging.getLogger(__name__)
 
 def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
               model="gemini-3.5-flash-lite", roster=None, calendar_ids=(), calendar=None,
-              meet_factory=None, company_references=None):
+              meet_factory=None, company_references=None, source_drive_factory=None):
     """Resume from a saved brief if a previous execution stopped before Chat."""
     data = state.claim_for_work(source_key)
     if not data:
@@ -59,8 +59,17 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
                         "meet_participant_record_status": "unavailable"}
             if source_ids or data.get("source_recording_id"):
                 try:
-                    evidence.update(source_evidence(drive, source_ids,
-                                                    data.get("source_recording_id")))
+                    owner = data.get("source_owner_email")
+                    recording_owner = data.get("recording_owner_email") or owner
+                    allowed = {email.casefold() for email in calendar_ids}
+                    source_drive = (source_drive_factory(owner)
+                                    if source_drive_factory and owner in allowed else drive)
+                    recording_drive = (source_drive_factory(recording_owner)
+                                       if source_drive_factory and recording_owner in allowed
+                                       else drive)
+                    evidence.update(source_evidence(
+                        source_drive, source_ids, data.get("source_recording_id"),
+                        recording_drive=recording_drive))
                 except Exception:
                     LOGGER.warning("Could not read Meet identity evidence for %s", source_key)
             evidence["archived_speech_words"] = speech["source_speech_words"]
@@ -118,10 +127,20 @@ def main():
                          if item.strip())
     service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
     meet_factory = (lambda user: meet_client_for_user(service_account_email, user)) if service_account_email else None
+    source_drives = {}
+    def source_drive(owner):
+        if owner not in source_drives:
+            source_drives[owner] = build(
+                "drive", "v3",
+                credentials=owner_drive_credentials(service_account_email, owner),
+                cache_discovery=False,
+            )
+        return source_drives[owner]
     company_references = parse_company_references(os.getenv("MEETING_COMPANY_REFERENCE_JSON"))
     work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
               os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"), roster,
-              calendar_ids, calendar_client(calendar_ids), meet_factory, company_references)
+              calendar_ids, calendar_client(calendar_ids), meet_factory,
+              company_references, source_drive if service_account_email else None)
 
 
 if __name__ == "__main__":

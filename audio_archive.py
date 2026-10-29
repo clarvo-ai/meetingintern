@@ -61,6 +61,10 @@ class Meeting:
     notes_name: str
     context_doc_ids: tuple[str, ...]
     recording_folder_id: str | None = None
+    source_owner_email: str | None = None
+    recording_owner_email: str | None = None
+    source_conference_record: str | None = None
+    meet_reader_email: str | None = None
 
 
 def drive_credentials(impersonate_service_account=None):
@@ -86,6 +90,19 @@ def drive_credentials(impersonate_service_account=None):
                 "https://www.googleapis.com/auth/documents"]
     )
     return credentials
+
+
+def owner_drive_credentials(service_account_email, owner_email, source_credentials=None):
+    """Read an organizer's Meet files by ID without depending on Drive sharing."""
+    source = source_credentials or google.auth.default(
+        scopes=["https://www.googleapis.com/auth/cloud-platform"]
+    )[0]
+    return impersonated_credentials.Credentials(
+        source_credentials=source,
+        target_principal=service_account_email,
+        target_scopes=["https://www.googleapis.com/auth/drive.readonly"],
+        subject=owner_email,
+    )
 
 
 def list_children(drive, folder_id):
@@ -615,10 +632,13 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
     return created["id"]
 
 
-def process_meeting(drive, docs, credentials, gemini, destination_folder_id, meeting):
+def process_meeting(drive, docs, credentials, gemini, destination_folder_id, meeting,
+                    source_drive=None, recording_credentials=None):
     """Write one shared transcript from audio or the three-hour Doc fallback."""
+    source_drive = source_drive or drive
+    recording_credentials = recording_credentials or credentials
     if not meeting.recording_id:
-        transcript = export_transcript(drive, meeting)
+        transcript = export_transcript(source_drive, meeting)
         method = "Google Meet transcript (recording unavailable after three hours)"
         if not transcript:
             raise RuntimeError(f"Meet document {meeting.notes_id} has no transcript yet")
@@ -626,7 +646,7 @@ def process_meeting(drive, docs, credentials, gemini, destination_folder_id, mee
         if duration_exceeds_limit(meeting.duration_seconds):
             return None
         with tempfile.TemporaryDirectory(prefix="meeting-audio-") as workdir:
-            with recording_proxy(credentials, meeting.recording_id) as recording_url:
+            with recording_proxy(recording_credentials, meeting.recording_id) as recording_url:
                 duration = meeting.duration_seconds
                 if duration is None:
                     duration = probe_duration_seconds(recording_url)
@@ -637,13 +657,13 @@ def process_meeting(drive, docs, credentials, gemini, destination_folder_id, mee
             if language == "no_speech":
                 return None
             if language == "english":
-                transcript = export_transcript(drive, meeting)
+                transcript = export_transcript(source_drive, meeting)
                 method = "Google Meet transcript (English)"
                 if not transcript:
                     transcript = gemini.translate_chunks(chunks)
                     method = "Gemini audio transcription (English fallback)"
             else:
-                transcript = gemini.translate_chunks(chunks, person_context(drive, meeting))
+                transcript = gemini.translate_chunks(chunks, person_context(source_drive, meeting))
                 method = "Gemini audio transcription and English translation"
     if not transcript:
         if meeting.recording_id:

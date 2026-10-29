@@ -135,8 +135,9 @@ def _source_artifact(metadata):
     }
 
 
-def source_evidence(drive, doc_ids, recording_id=None):
+def source_evidence(drive, doc_ids, recording_id=None, recording_drive=None):
     """Read source artifact IDs directly so separate Meet folders do not matter."""
+    recording_drive = recording_drive or drive
     documents = []
     created_at = None
     artifacts = []
@@ -157,7 +158,7 @@ def source_evidence(drive, doc_ids, recording_id=None):
             LOGGER.info("Meet source Doc %s is no longer readable: HTTP %s", doc_id, error.resp.status)
     if recording_id:
         try:
-            metadata = drive.files().get(
+            metadata = recording_drive.files().get(
                 fileId=recording_id,
                 fields="id,name,mimeType,createdTime,owners(emailAddress),description",
                 supportsAllDrives=True,

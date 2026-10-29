@@ -95,6 +95,29 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result["dispatched_count"], 1)
         launch.assert_called_once_with("job", "key")
 
+    def test_exact_meet_discovery_precedes_and_deduplicates_folder_fallback(self):
+        direct = Meeting(
+            source_key="meet-key", folder_id="unshared-folder", folder_name="Test",
+            recording_id="video", recording_name="Recording", duration_seconds=60,
+            notes_id="doc", notes_name="Transcript", context_doc_ids=("doc",),
+            source_owner_email="robert@clarvo.ai",
+            source_conference_record="conferenceRecords/one",
+        )
+        fallback = Meeting(
+            source_key="folder-key", folder_id="shared-folder", folder_name="Test",
+            recording_id="video", recording_name="Recording", duration_seconds=60,
+            notes_id="doc", notes_name="Transcript", context_doc_ids=("doc",),
+        )
+        state = Mock()
+        state.reserve_for_dispatch.return_value = True
+        launch = Mock(return_value="execution")
+        with patch("archive_checker.find_archived_recordings", return_value=set()), \
+             patch("archive_checker.find_meetings_across_roots", return_value=[fallback]):
+            result = check_once(["shared-root"], "destination", "job", state, None,
+                                launch=launch, direct_meetings=[direct])
+        self.assertEqual(result["dispatched_count"], 1)
+        launch.assert_called_once_with("job", "meet-key")
+
     def test_archive_worker_recovers_when_drive_changes_computed_source_key(self):
         meeting = Meeting(
             source_key="new-key", folder_id="folder", folder_name="Test",
@@ -135,6 +158,38 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(result, "output-doc")
         discover.assert_called_once_with(unittest.mock.ANY, ["notes-root", "video-root"])
         process.assert_called_once()
+
+    def test_direct_worker_rechecks_meet_record_and_reads_as_source_owner(self):
+        meeting = Meeting(
+            source_key="meet-key", folder_id="unshared-folder", folder_name="Test",
+            recording_id="video", recording_name="Recording", duration_seconds=60,
+            notes_id="doc", notes_name="Transcript", context_doc_ids=("doc",),
+            source_owner_email="robert@clarvo.ai",
+            recording_owner_email="robert@clarvo.ai",
+            source_conference_record="conferenceRecords/one",
+            meet_reader_email="robert@clarvo.ai",
+        )
+        state = Mock()
+        state.claim_for_work.return_value = {
+            "source_conference_record": "conferenceRecords/one",
+            "source_owner_email": "robert@clarvo.ai",
+            "meet_reader_email": "robert@clarvo.ai",
+            "source_notes_id": "doc",
+        }
+        with patch("archive_job.build", return_value=Mock()), \
+             patch("archive_job.meet_client_for_user") as meet_client, \
+             patch("archive_job.owner_drive_credentials", return_value=Mock()), \
+             patch("archive_job.meeting_from_record", return_value=meeting) as discover, \
+             patch("archive_job.existing_archive_doc_id", return_value=None), \
+             patch("archive_job.process_meeting", return_value="output-doc") as process:
+            result = archive_work_once(
+                "meet-key", "destination", "key", state, Mock(),
+                "drive-automation@example.com", ["robert@clarvo.ai"])
+        self.assertEqual(result, "output-doc")
+        meet_client.assert_called_once_with("drive-automation@example.com", "robert@clarvo.ai")
+        discover.assert_called_once()
+        self.assertIn("source_drive", process.call_args.kwargs)
+        self.assertIn("recording_credentials", process.call_args.kwargs)
 
     def test_root_groups_keep_owners_separate(self):
         self.assertEqual(source_groups(["juha", "robert"]), [["juha"], ["robert"]])

@@ -2,12 +2,22 @@
 
 ## Meet audio archive MVP
 
-`audio_archive.py` is a separate path for the newer Google Meet folder layout.
-The checker scans meeting folders under configured personal `Google Meet`
-folders every 15 minutes. It waits until a Meet Doc and an MP4 recording are
+`audio_archive.py` is a separate archive path for new Google Meet artifacts.
+Every 15 minutes, the checker first lists completed Meet conference records
+visible to the explicitly configured Juha, Robert, and Mark accounts.
+The Meet API supplies exact transcript and recording Drive file IDs. The
+checker verifies that the source Doc is actually owned by an allowed account,
+reads source files by ID through domain-wide delegated Drive access, and writes
+the English transcript as the service account to the company shared Drive.
+This does not depend on the personal Drive folder layout or change source
+sharing. The checker then scans the configured personal `Google Meet` folder
+roots as a fallback for artifacts absent from the Meet API. Matching source
+file IDs deduplicate the two discovery paths.
+
+Both paths wait until a Meet Doc and an MP4 recording are
 both unchanged for five minutes. If a recording has not appeared three hours after
-the Doc was created, it archives the settled Meet transcript alone. A visible but
-unfinished recording is allowed to settle before processing. Shortcuts are
+the Doc was created, they archive the settled Meet transcript alone. A visible but
+unfinished recording is allowed to settle before processing. Shortcuts in the folder fallback are
 followed only when the service account can read their targets. Recurring
 meeting folders are matched by the meeting timestamp in file names. Multiple
 Google Meet roots for one owner can be grouped so a Doc in one root pairs with
@@ -46,9 +56,22 @@ time limits automatic discovery to newly created Docs so deployment does not
 unexpectedly backfill historical meetings. Set `ARCHIVE_DESTINATION_FOLDER_ID`
 and `GOOGLE_AI_API_KEY` on the job; the checker supplies `ARCHIVE_STATE_ID` for
 each execution. `ARCHIVE_DISPATCH_LIMIT` defaults to five meetings per check.
-The source folders must be shared with the job's service account; access to a
-shortcut does not grant access to the shortcut's target. Keep the existing
+The folder fallback requires source folders shared with the job's service
+account; access to a shortcut does not grant access to its target. The primary
+Meet API path requires `MEETING_CALENDAR_IDS` and
+`MEETING_MEET_SERVICE_ACCOUNT_EMAIL` on both checker and archive job, Meet API
+access with `meetings.space.readonly`, and domain-wide delegation for
+`drive.readonly`. Set `MEET_API_START_TIME` on the checker to a timestamp with
+timezone when first enabling API discovery; this avoids an unintended backfill
+of historical test meetings. The existing `ARCHIVE_START_TIME` still limits the
+folder fallback. Keep the existing
 organizer and Chat summary pipeline configured separately.
+The analysis job uses the same delegated source reads for speaker evidence, so
+newly discovered files need no folder share for report context. Only artifacts
+actually owned by the configured accounts are eligible; an external organizer's
+recording visible to an invitee is not archived. Meet conference records expire
+after 30 days, so the checker scans the most recent 14 days and the folder
+fallback remains useful for older or otherwise absent API records.
 
 ## Premeeting Meet artifacts
 
@@ -67,8 +90,10 @@ Workspace domain-wide delegation must authorize the service account's numeric
 OAuth client ID for `https://www.googleapis.com/auth/meetings.space.settings`.
 The service account needs permission to mint its own delegated token, and the
 Cloud Scheduler caller needs Cloud Run invoker permission on the checker.
-Schedule `/auto-artifacts` separately from `/` so an authorization failure in
-premeeting configuration cannot delay ingestion. Automatic recording begins
+Schedule `/auto-artifacts` separately from `/`, with minutes staggered from
+the archive check if the Cloud Run service has one instance and concurrency one.
+An authorization failure in premeeting configuration cannot delay ingestion.
+Automatic recording begins
 only when a participant with recording privileges joins; Google Workspace
 recording eligibility and storage rules still apply.
 

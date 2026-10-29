@@ -194,6 +194,32 @@ class BriefTests(unittest.TestCase):
         self.assertIn("Full transcript", post.call_args.args[-1])
         self.assertIn("#operations", post.call_args.args[-1])
 
+    def test_new_direct_archive_reads_identity_evidence_as_source_owner(self):
+        state = Mock()
+        state.claim_for_work.return_value = {
+            "output_doc_id": "transcript", "source_notes_id": "source-doc",
+            "source_recording_id": "source-video",
+            "source_owner_email": "robert@clarvo.ai",
+            "recording_owner_email": "mark@clarvo.ai",
+        }
+        drive = Mock()
+        drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "transcript", "name": "Planning - English Transcript",
+            "parents": ["shared-folder"],
+        }
+        drive.files.return_value.export.return_value.execute.return_value = (
+            b"Method: Meet transcript\n\nRobert Holmberg: We should review the plan.\n")
+        robert_drive, mark_drive = Mock(), Mock()
+        sources = {"robert@clarvo.ai": robert_drive, "mark@clarvo.ai": mark_drive}
+        with patch("analysis_job.source_evidence", return_value={}) as source_evidence, \
+             patch("analysis_job.generate_report", return_value=BRIEF), \
+             patch("analysis_job.create_or_find_brief", return_value="brief"), \
+             patch("analysis_job.post_chat_message", return_value="message"):
+            work_once("source-key", state, drive, Mock(), "key", "webhook", "MEETINGS",
+                      calendar_ids=tuple(sources), source_drive_factory=sources.__getitem__)
+        source_evidence.assert_called_once_with(
+            robert_drive, ["source-doc"], "source-video", recording_drive=mark_drive)
+
     def test_uncertain_chat_delivery_is_not_retried(self):
         from meeting_analysis import ChatDeliveryUncertain
         state = Mock()

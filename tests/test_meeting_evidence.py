@@ -6,7 +6,7 @@ from unittest.mock import Mock
 from meeting_evidence import (apply_classification_evidence, archived_speech_body,
                               calendar_context, calendar_invitees, parse_meet_documents,
                               meet_participant_context, parse_team_roster,
-                              resolve_speaker_identities)
+                              resolve_speaker_identities, source_evidence)
 from meeting_analysis import format_brief, format_chat_message
 
 
@@ -35,6 +35,24 @@ BASE = {
 
 
 class EvidenceTests(unittest.TestCase):
+    def test_source_doc_and_recording_can_use_different_owner_drive_clients(self):
+        doc_drive = Mock()
+        video_drive = Mock()
+        doc_drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "doc", "name": "Meeting - Transcript",
+            "owners": [{"emailAddress": "robert@clarvo.ai"}],
+        }
+        doc_drive.files.return_value.export.return_value.execute.return_value = (
+            b"Robert Holmberg: We should follow up.\n")
+        video_drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "video", "name": "Meeting - Recording", "mimeType": "video/mp4",
+            "owners": [{"emailAddress": "mark@clarvo.ai"}],
+        }
+        evidence = source_evidence(doc_drive, ["doc"], "video", video_drive)
+        self.assertEqual(evidence["speakers"], ["Robert Holmberg"])
+        self.assertEqual(len(evidence["source_artifacts"]), 2)
+        video_drive.files.return_value.get.assert_called_once()
+
     def test_roster_must_be_explicit_and_complete(self):
         raw = '[{"name":"Juha Lehto","email":"juha@clarvo.ai"}]'
         self.assertEqual(parse_team_roster(raw), {"juha@clarvo.ai": "Juha Lehto"})

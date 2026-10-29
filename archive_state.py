@@ -49,6 +49,10 @@ class ArchiveState:
                 "source_recording_id": getattr(meeting, "recording_id", None),
                 "source_notes_id": meeting.notes_id,
                 "source_context_doc_ids": list(getattr(meeting, "context_doc_ids", (meeting.notes_id,))),
+                "source_owner_email": getattr(meeting, "source_owner_email", None),
+                "recording_owner_email": getattr(meeting, "recording_owner_email", None),
+                "source_conference_record": getattr(meeting, "source_conference_record", None),
+                "meet_reader_email": getattr(meeting, "meet_reader_email", None),
                 "updated_at": now,
             }, merge=True)
             return True
