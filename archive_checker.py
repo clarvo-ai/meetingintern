@@ -15,6 +15,8 @@ from analysis_state import AnalysisState
 from archive_state import ArchiveState
 from audio_archive import (drive_credentials, find_archived_recordings,
                            find_meetings_across_roots)
+from meeting_auto_artifacts import (calendar_client, calendar_ids,
+                                    enable_upcoming_artifacts, meet_settings_client)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -117,6 +119,25 @@ def source_groups(flat_roots, groups_json=None):
 @app.get("/health")
 def health():
     return jsonify({"status": "ok"})
+
+
+@app.post("/auto-artifacts")
+def auto_artifacts_upcoming():
+    """Run premeeting Meet settings separately from the archive scanner."""
+    try:
+        owners = calendar_ids(os.getenv("MEETING_CALENDAR_IDS", ""))
+    except ValueError as error:
+        return jsonify({"error": str(error)}), 500
+    service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
+    if not service_account_email:
+        return jsonify({"error": "Missing MEETING_MEET_SERVICE_ACCOUNT_EMAIL"}), 500
+    calendar = calendar_client()
+    result = enable_upcoming_artifacts(
+        calendar,
+        lambda owner: meet_settings_client(service_account_email, owner),
+        owners,
+    )
+    return jsonify(result), 502 if result["errors"] else 200
 
 
 @app.post("/")

@@ -7,7 +7,7 @@ RUN apt-get update && apt-get install -y --no-install-recommends \
 
 COPY requirements.txt .
 RUN pip install --no-cache-dir -r requirements.txt
-COPY audio_archive.py archive_state.py analysis_state.py archive_checker.py ./
+COPY audio_archive.py archive_state.py analysis_state.py meeting_auto_artifacts.py archive_checker.py ./
 
 ENV PYTHONUNBUFFERED=1
 CMD ["python", "archive_checker.py"]

@@ -50,6 +50,28 @@ The source folders must be shared with the job's service account; access to a
 shortcut does not grant access to the shortcut's target. Keep the existing
 organizer and Chat summary pipeline configured separately.
 
+## Premeeting Meet artifacts
+
+The checker image also exposes `POST /auto-artifacts` for a separate 15-minute
+Cloud Scheduler job. Set `MEETING_CALENDAR_IDS` to the primary calendars that
+the service account can read and `MEETING_MEET_SERVICE_ACCOUNT_EMAIL` to the
+delegated service account. The route looks at confirmed events starting in the
+next 24 hours. It only changes Calendar-created Meet spaces when the event
+organizer and creator both match the configured primary calendar. Invitations,
+past meetings, and events without a Calendar Meet conference ID are ignored.
+For each eligible space, it enables automatic recording, transcription, and
+Gemini notes if needed, leaving unrelated Meet settings unchanged. A repeated
+check is safe because spaces already set to `ON` are not patched.
+
+Workspace domain-wide delegation must authorize the service account's numeric
+OAuth client ID for `https://www.googleapis.com/auth/meetings.space.settings`.
+The service account needs permission to mint its own delegated token, and the
+Cloud Scheduler caller needs Cloud Run invoker permission on the checker.
+Schedule `/auto-artifacts` separately from `/` so an authorization failure in
+premeeting configuration cannot delay ingestion. Automatic recording begins
+only when a participant with recording privileges joins; Google Workspace
+recording eligibility and storage rules still apply.
+
 ## Meeting briefs and Chat updates
 
 When an archive job publishes a full English transcript, it marks that meeting
