@@ -6,7 +6,7 @@
 The checker scans meeting folders under configured personal `Google Meet`
 folders every 15 minutes. It waits until a Meet Doc and an MP4 recording are
 both unchanged for five minutes. If a recording has not appeared three hours after
-the Doc's last update, it archives the Meet transcript alone. A visible but
+the Doc was created, it archives the settled Meet transcript alone. A visible but
 unfinished recording is allowed to settle before processing. Shortcuts are
 followed only when the service account can read their targets. Recurring
 meeting folders are matched by the meeting timestamp in file names. Multiple

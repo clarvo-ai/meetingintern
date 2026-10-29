@@ -154,8 +154,9 @@ def _same_owner(first, second):
 def find_meetings_in_folders(drive, folders, minimum_age_minutes=5, now=None, not_before=None):
     """Pair notes and recordings across one owner's shared Meet folders.
 
-    A Doc without a recording becomes ready three hours after its last update. A
-    visible but unfinished recording blocks that fallback until it settles.
+    A Doc without a recording becomes ready three hours after it was created,
+    once its latest update has settled. A visible but unfinished recording
+    blocks that fallback until it settles.
     """
     now = now or datetime.now(timezone.utc)
     settle_wait = timedelta(minutes=minimum_age_minutes)
@@ -195,6 +196,10 @@ def find_meetings_in_folders(drive, folders, minimum_age_minutes=5, now=None, no
             datetime.fromisoformat(item["modifiedTime"].replace("Z", "+00:00"))
             for item in candidates
         )
+        doc_created = min(
+            datetime.fromisoformat(item["createdTime"].replace("Z", "+00:00"))
+            for item in candidates
+        )
         if now - doc_modified < settle_wait:
             continue
         note_stems = {_meeting_stem(item.get("displayName", item["name"])) for item in candidates}
@@ -216,7 +221,7 @@ def find_meetings_in_folders(drive, folders, minimum_age_minutes=5, now=None, no
             video_modified = datetime.fromisoformat(recording["modifiedTime"].replace("Z", "+00:00"))
             if now - video_modified < settle_wait:
                 continue
-        elif now - doc_modified < RECORDING_WAIT:
+        elif now - doc_created < RECORDING_WAIT:
             continue
         display_name = (recording.get("displayName", recording["name"]) if recording
                         else notes.get("displayName", notes["name"]))

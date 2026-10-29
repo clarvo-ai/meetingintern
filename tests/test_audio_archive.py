@@ -81,9 +81,14 @@ class MeetingDiscoveryTests(unittest.TestCase):
             self.assertEqual(find_meetings(None, folder), [])
 
         old_created = artifact("Test - 2026/10/27 09:00 EET - Transcript", DOC_MIME, "editing", 190)
-        old_created["modifiedTime"] = recent["modifiedTime"]
+        old_created["modifiedTime"] = artifact("unused", DOC_MIME, "unused", 1)["modifiedTime"]
         with patch("audio_archive.list_children", return_value=[old_created]):
             self.assertEqual(find_meetings(None, folder), [])
+
+        old_created["modifiedTime"] = artifact("unused", DOC_MIME, "unused", 10)["modifiedTime"]
+        with patch("audio_archive.list_children", return_value=[old_created]), \
+             patch("audio_archive.export_transcript", return_value="Ready transcript"):
+            self.assertEqual(len(find_meetings(None, folder)), 1)
 
         with patch("audio_archive.list_children", return_value=[notes]), \
              patch("audio_archive.export_transcript", return_value=""):
