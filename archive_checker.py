@@ -54,13 +54,15 @@ def launch_analysis_job(job_name, source_key):
 
 def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
                            launch=launch_analysis_job):
-    """Dispatch briefs independently from long audio archive work."""
+    """Launch only the oldest analysis, preserving Chat order across checks."""
     dispatched = []
     for source_key in state.candidates():
-        if len(dispatched) >= dispatch_limit:
+        if dispatch_limit <= 0:
             break
         if not state.reserve_for_dispatch(source_key):
-            continue
+            # The oldest meeting is active or waiting to retry; later briefs
+            # must not overtake it in the Chat space.
+            break
         try:
             execution = launch(job_name, source_key)
             state.mark_queued(source_key, execution)
@@ -68,6 +70,7 @@ def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
         except Exception as error:
             state.mark_retry(source_key, error, "dispatching")
             LOGGER.exception("Could not launch analysis job for %s", source_key)
+        break
     return dispatched
 
 

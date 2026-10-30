@@ -69,6 +69,8 @@ timezone when first enabling API discovery; this avoids an unintended backfill
 of historical test meetings. The existing `ARCHIVE_START_TIME` still limits the
 folder fallback. Keep the existing
 organizer and Chat summary pipeline configured separately.
+The checker dispatches one ready analysis at a time, oldest meeting first;
+an active or retrying older brief holds newer Chat posts until it resolves.
 The analysis job uses the same delegated source reads for speaker evidence, so
 newly discovered files need no folder share for report context. Only artifacts
 actually owned by `MEETING_CALENDAR_IDS` or the optional

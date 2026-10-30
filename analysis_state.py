@@ -21,12 +21,20 @@ class AnalysisState:
         self.client = firestore.Client(project=project_id)
         self.collection = self.client.collection("meeting_audio_archive")
 
-    def candidates(self, limit=100):
-        """Read only unfinished analyses; transactions decide actual eligibility."""
+    def candidates(self):
+        """Visit the oldest ready meeting first so Chat delivery is serialized."""
         query = self.collection.where(filter=FieldFilter(
             "analysis_status", "in", ["pending", *ACTIVE_STATUSES]
-        )).limit(limit)
-        return [snapshot.id for snapshot in query.stream()]
+        ))
+        snapshots = list(query.stream())
+        # Older documents lack a meeting timestamp; their archive time is the
+        # best available ordering key until they have all been reconciled.
+        snapshots.sort(key=lambda item: (
+            item.to_dict().get("meeting_started_at") or
+            item.to_dict().get("updated_at") or datetime.max.replace(tzinfo=timezone.utc),
+            item.id,
+        ))
+        return [snapshot.id for snapshot in snapshots]
 
     def reserve_for_dispatch(self, source_key):
         """Prevent two checker runs from launching the same analysis."""

@@ -65,6 +65,7 @@ class Meeting:
     recording_owner_email: str | None = None
     source_conference_record: str | None = None
     meet_reader_email: str | None = None
+    started_at: datetime | None = None
 
 
 def drive_credentials(impersonate_service_account=None):
@@ -257,6 +258,7 @@ def find_meetings_in_folders(drive, folders, minimum_age_minutes=5, now=None, no
             notes_id=notes["id"], notes_name=notes["name"],
             context_doc_ids=tuple(item["id"] for item in candidates),
             recording_folder_id=recording["source_folder_id"] if recording else None,
+            started_at=doc_created,
         )
         if not recording and not export_transcript(drive, meeting):
             LOGGER.info("Waiting for a transcript or recording in folder %s", notes_folder_id)

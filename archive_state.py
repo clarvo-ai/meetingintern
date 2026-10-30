@@ -53,6 +53,7 @@ class ArchiveState:
                 "recording_owner_email": getattr(meeting, "recording_owner_email", None),
                 "source_conference_record": getattr(meeting, "source_conference_record", None),
                 "meet_reader_email": getattr(meeting, "meet_reader_email", None),
+                "meeting_started_at": getattr(meeting, "started_at", None),
                 "updated_at": now,
             }, merge=True)
             return True

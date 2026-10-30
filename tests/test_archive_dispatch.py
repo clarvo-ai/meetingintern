@@ -1,6 +1,7 @@
 """Verify that frequent checks cannot dispatch or work a meeting twice."""
 
 import unittest
+from datetime import datetime, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -226,6 +227,27 @@ class DispatchTests(unittest.TestCase):
         self.assertEqual(dispatched, ["meeting-one"])
         launch.assert_called_once_with("job", "meeting-one")
         state.mark_queued.assert_called_once_with("meeting-one", "execution")
+
+    def test_analysis_dispatch_waits_when_oldest_meeting_is_active(self):
+        state = Mock()
+        state.candidates.return_value = ["old", "new"]
+        state.reserve_for_dispatch.return_value = False
+        launch = Mock()
+        self.assertEqual(dispatch_analysis_jobs(state, "job", launch=launch), [])
+        state.reserve_for_dispatch.assert_called_once_with("old")
+        launch.assert_not_called()
+
+    def test_analysis_candidates_are_sorted_by_meeting_start(self):
+        state = AnalysisState.__new__(AnalysisState)
+        state.collection = Mock()
+        earlier = datetime(2026, 10, 29, 8, tzinfo=timezone.utc)
+        later = datetime(2026, 10, 29, 15, tzinfo=timezone.utc)
+        snapshots = [
+            SimpleNamespace(id="late", to_dict=lambda: {"meeting_started_at": later}),
+            SimpleNamespace(id="early", to_dict=lambda: {"meeting_started_at": earlier}),
+        ]
+        state.collection.where.return_value.stream.return_value = snapshots
+        self.assertEqual(state.candidates(), ["early", "late"])
 
     def test_empty_analysis_source_cannot_be_dispatched_again(self):
         state = AnalysisState.__new__(AnalysisState)
