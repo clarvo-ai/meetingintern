@@ -138,7 +138,7 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
 
 
 def find_meet_meetings(meet_factory, drive_factory, owners, now=None,
-                       not_before=None, errors=None):
+                       not_before=None, errors=None, file_owners=None):
     """Union visible conferences, then resolve actual Drive ownership once."""
     now = now or datetime.now(timezone.utc)
     errors = errors if errors is not None else []
@@ -161,7 +161,7 @@ def find_meet_meetings(meet_factory, drive_factory, owners, now=None,
     for record, preferred in records.values():
         try:
             yield meeting_from_record(record, clients[preferred[0]], drive_factory,
-                                      owners, preferred, now, not_before)
+                                      file_owners or owners, preferred, now, not_before)
         except Exception:
             LOGGER.exception("Could not inspect Meet artifacts for %s", record["name"])
             errors.append(f"artifacts:{record['name']}")

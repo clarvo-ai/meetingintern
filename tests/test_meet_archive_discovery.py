@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from meet_archive_discovery import meeting_from_record
+from meet_archive_discovery import find_meet_meetings, meeting_from_record
 
 
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
@@ -72,6 +72,20 @@ class MeetDiscoveryTests(unittest.TestCase):
         self.assertIsNone(meeting_from_record(self.record, self.meet,
                                               lambda _owner: self.drive, OWNERS,
                                               now=NOW))
+
+    def test_approved_additional_file_owner_does_not_expand_meet_scan(self):
+        self.doc["owners"] = [{"emailAddress": "juho@clarvo.ai"}]
+        self.video["owners"] = [{"emailAddress": "juho@clarvo.ai"}]
+        self.record["startTime"] = stamp(timedelta(hours=4))
+        self.meet.conferenceRecords.return_value.list.return_value.execute.return_value = {
+            "conferenceRecords": [self.record]}
+        meet_factory = Mock(return_value=self.meet)
+        meetings = list(find_meet_meetings(
+            meet_factory, lambda _owner: self.drive, ["robert@clarvo.ai"],
+            now=NOW, file_owners=["robert@clarvo.ai", "juho@clarvo.ai"]))
+        self.assertEqual(len(meetings), 1)
+        self.assertEqual(meetings[0].source_owner_email, "juho@clarvo.ai")
+        meet_factory.assert_called_once_with("robert@clarvo.ai")
 
     def test_visible_recording_blocks_doc_fallback_until_settled(self):
         self.video["modifiedTime"] = stamp(timedelta(minutes=1))

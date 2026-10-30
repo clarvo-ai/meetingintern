@@ -71,8 +71,10 @@ folder fallback. Keep the existing
 organizer and Chat summary pipeline configured separately.
 The analysis job uses the same delegated source reads for speaker evidence, so
 newly discovered files need no folder share for report context. Only artifacts
-actually owned by the configured accounts are eligible; an external organizer's
-recording visible to an invitee is not archived. Meet conference records expire
+actually owned by `MEETING_CALENDAR_IDS` or the optional
+`MEETING_ADDITIONAL_FILE_OWNERS` accounts are eligible; the latter grants file
+access without enabling automatic recording on that person's calendar. An
+external organizer's recording visible to an invitee is not archived. Meet conference records expire
 after 30 days, so the checker scans the most recent 14 days and the folder
 fallback remains useful for older or otherwise absent API records.
 

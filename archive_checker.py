@@ -172,6 +172,9 @@ def check_meetings():
     calendar_raw = os.getenv("MEETING_CALENDAR_IDS")
     if service_account_email and calendar_raw:
         owners = calendar_ids(calendar_raw)
+        file_owners = list(dict.fromkeys([
+            *owners, *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", ""))
+        ]))
         direct_start_raw = os.getenv("MEET_API_START_TIME")
         direct_start = (datetime.fromisoformat(direct_start_raw.replace("Z", "+00:00"))
                         if direct_start_raw else not_before)
@@ -190,7 +193,7 @@ def check_meetings():
             direct_meetings = [meeting for meeting in find_meet_meetings(
                 lambda owner: meet_client_for_user(service_account_email, owner),
                 source_drive, owners, not_before=max(not_before, direct_start),
-                errors=direct_errors) if meeting]
+                errors=direct_errors, file_owners=file_owners) if meeting]
         except Exception:
             LOGGER.exception("Meet API discovery failed; continuing with shared Drive folders")
             direct_errors.append("unexpected")

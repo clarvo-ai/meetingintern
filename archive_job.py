@@ -108,7 +108,10 @@ def main():
     _, project_id = google.auth.default()
     state = ArchiveState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
     service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
-    owners = calendar_ids(os.getenv("MEETING_CALENDAR_IDS", "")) if service_account_email else ()
+    owners = (list(dict.fromkeys([
+        *calendar_ids(os.getenv("MEETING_CALENDAR_IDS", "")),
+        *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", "")),
+    ])) if service_account_email else ())
     output = work_once(source_key, destination, api_key, state, drive_credentials(),
                        service_account_email, owners)
     LOGGER.info("Finished archive work for %s; output Doc: %s", source_key, output)
