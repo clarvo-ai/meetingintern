@@ -57,7 +57,7 @@ class Meeting:
     recording_id: str | None
     recording_name: str | None
     duration_seconds: float | None
-    notes_id: str
+    notes_id: str | None
     notes_name: str
     context_doc_ids: tuple[str, ...]
     recording_folder_id: str | None = None
@@ -315,7 +315,7 @@ def existing_archive_doc_id(drive, destination_folder_id, meeting):
         for item in response.get("files", []):
             properties = item.get("properties", {})
             if (properties.get("source_key") == meeting.source_key or
-                    properties.get("source_notes_id") == meeting.notes_id or
+                    (meeting.notes_id and properties.get("source_notes_id") == meeting.notes_id) or
                     (meeting.recording_id and properties.get("source_recording_id") == meeting.recording_id)):
                 return item["id"]
         page_token = response.get("nextPageToken")
@@ -325,6 +325,8 @@ def existing_archive_doc_id(drive, destination_folder_id, meeting):
 
 def export_transcript(drive, meeting):
     """Return Meet speech only when its transcript section contains spoken text."""
+    if not meeting.notes_id:
+        return ""
     raw = drive.files().export(fileId=meeting.notes_id, mimeType="text/plain").execute()
     text = raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw
     if "Transcript" in meeting.notes_name and "Notes by Gemini" not in meeting.notes_name:
@@ -348,6 +350,8 @@ def export_transcript(drive, meeting):
 
 def person_context(drive, meeting):
     """Extract spelling hints, never speech content, from the Meet documents."""
+    if not meeting.notes_id:
+        return ""
     names = set()
     emails = set()
     for doc_id in meeting.context_doc_ids:
@@ -602,9 +606,10 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
     title = f"{meeting.folder_name} - English Transcript"
     properties = {
         "source_key": meeting.source_key,
-        "source_notes_id": meeting.notes_id,
         "transcription_method": method,
     }
+    if meeting.notes_id:
+        properties["source_notes_id"] = meeting.notes_id
     if meeting.recording_id:
         properties["source_recording_id"] = meeting.recording_id
     body = {
@@ -618,7 +623,7 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
         f"{title}\n\n"
         f"Source recording: "
         f"{f'https://drive.google.com/file/d/{meeting.recording_id}/view' if meeting.recording_id else 'not available after three hours'}\n"
-        f"Source notes: https://docs.google.com/document/d/{meeting.notes_id}/edit\n"
+        f"Source notes: {f'https://docs.google.com/document/d/{meeting.notes_id}/edit' if meeting.notes_id else 'not generated'}\n"
         f"Method: {method}\n\n{transcript}\n"
     )
     try:
@@ -658,10 +663,9 @@ def process_meeting(drive, docs, credentials, gemini, destination_folder_id, mee
                 return None
             if language == "english":
                 transcript = export_transcript(source_drive, meeting)
-                method = "Google Meet transcript (English)"
+                method = "Google Meet transcript (English)" if transcript else "Gemini audio transcription (English fallback)"
                 if not transcript:
                     transcript = gemini.translate_chunks(chunks)
-                    method = "Gemini audio transcription (English fallback)"
             else:
                 transcript = gemini.translate_chunks(chunks, person_context(source_drive, meeting))
                 method = "Gemini audio transcription and English translation"

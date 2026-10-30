@@ -203,6 +203,29 @@ class ProcessingTests(unittest.TestCase):
         export.assert_called_once_with(source_drive, self.meeting(None))
         self.assertIs(create.call_args.args[0], company_drive)
 
+    def test_recording_without_meet_doc_transcribes_english_audio(self):
+        meeting = replace(self.meeting(), notes_id=None, notes_name="", context_doc_ids=())
+        gemini = Mock()
+        gemini.detect_language.return_value = "english"
+        gemini.translate_chunks.return_value = "Full spoken transcript"
+        with patch("audio_archive.recording_proxy") as proxy, \
+             patch("audio_archive.extract_audio_chunks", return_value=["chunk"]), \
+             patch("audio_archive.create_archive_doc", return_value="output") as create:
+            proxy.return_value.__enter__.return_value = "recording-url"
+            output = process_meeting(Mock(), Mock(), Mock(), gemini,
+                                     "destination", meeting)
+        self.assertEqual(output, "output")
+        gemini.translate_chunks.assert_called_once_with(["chunk"])
+        self.assertEqual(create.call_args.args[-1], "Gemini audio transcription (English fallback)")
+
+    def test_recording_only_idempotency_does_not_match_unrelated_missing_note(self):
+        from audio_archive import existing_archive_doc_id
+        meeting = replace(self.meeting(), notes_id=None, notes_name="", context_doc_ids=())
+        drive = Mock()
+        drive.files.return_value.list.return_value.execute.return_value = {
+            "files": [{"id": "unrelated", "properties": {"source_notes_id": "other"}}]}
+        self.assertIsNone(existing_archive_doc_id(drive, "destination", meeting))
+
     def test_finnish_audio_output_is_translated_before_archive(self):
         gemini = AudioGemini.__new__(AudioGemini)
         gemini._with_uploaded_audio = Mock(return_value="Tämä on suomenkielinen puhe.")

@@ -86,6 +86,19 @@ class MeetDiscoveryTests(unittest.TestCase):
                                               lambda _owner: self.drive, OWNERS,
                                               now=NOW))
 
+    def test_recording_without_transcript_becomes_ready_after_three_hours(self):
+        self.meet.conferenceRecords.return_value.transcripts.return_value.list.return_value.execute.return_value = {}
+        meeting = meeting_from_record(self.record, self.meet,
+                                      lambda _owner: self.drive, OWNERS,
+                                      preferred=["robert@clarvo.ai"], now=NOW)
+        self.assertIsNone(meeting.notes_id)
+        self.assertEqual(meeting.recording_id, "video")
+        self.assertEqual(meeting.source_owner_email, "robert@clarvo.ai")
+        self.video["createdTime"] = stamp(timedelta(hours=2))
+        self.assertIsNone(meeting_from_record(self.record, self.meet,
+                                              lambda _owner: self.drive, OWNERS,
+                                              now=NOW))
+
 
 if __name__ == "__main__":
     unittest.main()

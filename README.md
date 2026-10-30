@@ -16,8 +16,11 @@ file IDs deduplicate the two discovery paths.
 
 Both paths wait until a Meet Doc and an MP4 recording are
 both unchanged for five minutes. If a recording has not appeared three hours after
-the Doc was created, they archive the settled Meet transcript alone. A visible but
-unfinished recording is allowed to settle before processing. Shortcuts in the folder fallback are
+the Doc was created, they archive the settled Meet transcript alone. The Meet
+API path also handles a generated recording with no Meet transcript: after
+three hours it transcribes the recording audio with Gemini and creates the
+English transcript. A visible but unfinished recording is allowed to settle
+before processing. Shortcuts in the folder fallback are
 followed only when the service account can read their targets. Recurring
 meeting folders are matched by the meeting timestamp in file names. Multiple
 Google Meet roots for one owner can be grouped so a Doc in one root pairs with

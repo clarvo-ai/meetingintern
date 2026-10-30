@@ -55,28 +55,29 @@ def _owned_file(drive_factory, file_id, preferred, owners, mime_type):
 
 def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=None,
                         not_before=None):
-    """Require a generated Meet Doc and pair it with this conference's recording."""
+    """Pair exact artifacts; transcribe a settled recording when Meet made no Doc."""
     now = now or datetime.now(timezone.utc)
     if not record.get("endTime"):
         return None
     name = record["name"]
-    transcript_artifacts = [item for item in _pages(
+    raw_transcripts = list(_pages(
         lambda token: meet.conferenceRecords().transcripts().list(
-            parent=name, pageSize=100, pageToken=token), "transcripts")
+            parent=name, pageSize=100, pageToken=token), "transcripts"))
+    if any(item.get("state") in ("STARTED", "ENDED") for item in raw_transcripts):
+        return None
+    transcript_artifacts = [item for item in raw_transcripts
         if item.get("state") == "FILE_GENERATED"
         and item.get("docsDestination", {}).get("document")]
-    if len(transcript_artifacts) != 1:
-        if len(transcript_artifacts) > 1:
-            LOGGER.warning("Multiple transcripts for %s; leaving folder fallback to handle it", name)
+    if len(transcript_artifacts) > 1:
+        LOGGER.warning("Multiple transcripts for %s; leaving folder fallback to handle it", name)
         return None
-    notes_id = transcript_artifacts[0]["docsDestination"]["document"]
-    notes = _owned_file(drive_factory, notes_id, preferred, owners, DOC_MIME)
-    if not notes:
+    notes_id = (transcript_artifacts[0]["docsDestination"]["document"]
+                if transcript_artifacts else None)
+    notes = _owned_file(drive_factory, notes_id, preferred, owners, DOC_MIME) if notes_id else None
+    if notes_id and not notes:
         LOGGER.info("Meet Doc %s is not owned by an allowed source user or is inaccessible", notes_id)
         return None
-    if not_before and _timestamp(notes["createdTime"]) < not_before:
-        return None
-    if now - _timestamp(notes["modifiedTime"]) < SETTLE_WAIT:
+    if notes and now - _timestamp(notes["modifiedTime"]) < SETTLE_WAIT:
         return None
 
     recording_artifacts = list(_pages(
@@ -94,7 +95,8 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
     if recordings:
         recording_id = recordings[0]["driveDestination"]["file"]
         recording = _owned_file(drive_factory, recording_id,
-                                [notes["source_owner_email"], *preferred], owners,
+                                [notes["source_owner_email"], *preferred] if notes else preferred,
+                                owners,
                                 RECORDING_MIME)
         if not recording:
             # A generated recording must be readable before the Doc-only fallback.
@@ -102,25 +104,33 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
             return None
         if now - _timestamp(recording["modifiedTime"]) < SETTLE_WAIT:
             return None
-    elif now - _timestamp(notes["createdTime"]) < RECORDING_WAIT:
+    elif not notes or now - _timestamp(notes["createdTime"]) < RECORDING_WAIT:
+        return None
+
+    if not_before and all(_timestamp(item["createdTime"]) < not_before
+                          for item in (notes, recording) if item):
+        return None
+    if recording and not notes and now - _timestamp(recording["createdTime"]) < RECORDING_WAIT:
+        # Meet can generate the video before the transcript Doc.
         return None
 
     title = re.sub(r"\s+-\s+(?:Recording|Transcript|Notes by Gemini)$", "",
-                   notes["name"], flags=re.I)
+                   (notes or recording)["name"], flags=re.I)
     meeting = Meeting(
         source_key=hashlib.sha256(f"meet:{name}".encode()).hexdigest(),
-        folder_id=(notes.get("parents") or [""])[0], folder_name=title,
+        folder_id=((notes or recording).get("parents") or [""])[0], folder_name=title,
         recording_id=recording["id"] if recording else None,
         recording_name=recording["name"] if recording else None,
         duration_seconds=(int(recording["videoMediaMetadata"]["durationMillis"]) / 1000
                           if recording and recording.get("videoMediaMetadata", {}).get("durationMillis")
                           else None),
-        notes_id=notes_id, notes_name=notes["name"], context_doc_ids=(notes_id,),
+        notes_id=notes_id, notes_name=notes["name"] if notes else "",
+        context_doc_ids=(notes_id,) if notes_id else (),
         recording_folder_id=(recording.get("parents") or [None])[0] if recording else None,
-        source_owner_email=notes["source_owner_email"],
+        source_owner_email=(notes or recording)["source_owner_email"],
         recording_owner_email=recording["source_owner_email"] if recording else None,
         source_conference_record=name,
-        meet_reader_email=preferred[0] if preferred else notes["source_owner_email"],
+        meet_reader_email=preferred[0] if preferred else (notes or recording)["source_owner_email"],
     )
     if not recording and not export_transcript(drive_factory(meeting.source_owner_email), meeting):
         return None
