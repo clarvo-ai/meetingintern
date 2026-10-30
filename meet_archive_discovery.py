@@ -63,8 +63,6 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
     raw_transcripts = list(_pages(
         lambda token: meet.conferenceRecords().transcripts().list(
             parent=name, pageSize=100, pageToken=token), "transcripts"))
-    if any(item.get("state") in ("STARTED", "ENDED") for item in raw_transcripts):
-        return None
     transcript_artifacts = [item for item in raw_transcripts
         if item.get("state") == "FILE_GENERATED"
         and item.get("docsDestination", {}).get("document")]
@@ -83,8 +81,6 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
     recording_artifacts = list(_pages(
         lambda token: meet.conferenceRecords().recordings().list(
             parent=name, pageSize=100, pageToken=token), "recordings"))
-    if any(item.get("state") in ("STARTED", "ENDED") for item in recording_artifacts):
-        return None
     recordings = [item for item in recording_artifacts
         if item.get("state") == "FILE_GENERATED"
         and item.get("driveDestination", {}).get("file")]

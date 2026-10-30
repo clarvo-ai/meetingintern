@@ -19,8 +19,8 @@ both unchanged for five minutes. If a recording has not appeared three hours aft
 the Doc was created, they archive the settled Meet transcript alone. The Meet
 API path also handles a generated recording with no Meet transcript: after
 three hours it transcribes the recording audio with Gemini and creates the
-English transcript. A visible but unfinished recording is allowed to settle
-before processing. Shortcuts in the folder fallback are
+English transcript. Meet API artifacts stuck in `STARTED` or `ENDED` wait the
+same three hours before the available Doc or recording is used alone. Shortcuts in the folder fallback are
 followed only when the service account can read their targets. Recurring
 meeting folders are matched by the meeting timestamp in file names. Multiple
 Google Meet roots for one owner can be grouped so a Doc in one root pairs with

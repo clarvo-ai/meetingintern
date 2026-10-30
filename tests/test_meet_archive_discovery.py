@@ -93,12 +93,21 @@ class MeetDiscoveryTests(unittest.TestCase):
                                               lambda _owner: self.drive, OWNERS,
                                               now=NOW))
 
-    def test_unfinished_recording_blocks_doc_fallback_after_three_hours(self):
+    def test_ended_recording_falls_back_to_doc_after_three_hours(self):
         self.meet.conferenceRecords.return_value.recordings.return_value.list.return_value.execute.return_value = {
             "recordings": [{"state": "ENDED"}]}
-        self.assertIsNone(meeting_from_record(self.record, self.meet,
-                                              lambda _owner: self.drive, OWNERS,
-                                              now=NOW))
+        with patch("meet_archive_discovery.export_transcript", return_value="Hello"):
+            meeting = meeting_from_record(self.record, self.meet,
+                                          lambda _owner: self.drive, OWNERS, now=NOW)
+        self.assertIsNone(meeting.recording_id)
+
+    def test_ended_transcript_falls_back_to_recording_after_three_hours(self):
+        self.meet.conferenceRecords.return_value.transcripts.return_value.list.return_value.execute.return_value = {
+            "transcripts": [{"state": "ENDED"}]}
+        meeting = meeting_from_record(self.record, self.meet,
+                                      lambda _owner: self.drive, OWNERS, now=NOW)
+        self.assertIsNone(meeting.notes_id)
+        self.assertEqual(meeting.recording_id, "video")
 
     def test_recording_without_transcript_becomes_ready_after_three_hours(self):
         self.meet.conferenceRecords.return_value.transcripts.return_value.list.return_value.execute.return_value = {}
