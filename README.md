@@ -87,7 +87,8 @@ Cloud Scheduler job. Set `MEETING_CALENDAR_IDS` to the primary calendars that
 the service account can read and `MEETING_MEET_SERVICE_ACCOUNT_EMAIL` to the
 delegated service account. The route looks at confirmed events starting in the
 next 24 hours. It only changes Calendar-created Meet spaces when the event
-organizer and creator both match the configured primary calendar. Invitations,
+organizer matches the configured primary calendar. The original creator may be
+an older email address after an event or domain migration. Invitations,
 past meetings, and events without a Calendar Meet conference ID are ignored.
 For each eligible space, it enables automatic recording, transcription, and
 Gemini notes if needed, leaving unrelated Meet settings unchanged. A repeated
