@@ -38,6 +38,9 @@ class AutoRecordingTests(unittest.TestCase):
                          ["mark@clarvo.ai", "juha@clarvo.ai"])
         with self.assertRaises(ValueError):
             calendar_ids("mark@clarvo.ai,MARK@clarvo.ai")
+        self.assertEqual(calendar_ids("", allow_empty=True), [])
+        with self.assertRaises(ValueError):
+            calendar_ids("mark@clarvo.ai,MARK@clarvo.ai", allow_empty=True)
 
     def test_only_future_self_organized_meet_space_is_patched_once(self):
         events = [

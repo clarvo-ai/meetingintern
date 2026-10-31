@@ -110,7 +110,7 @@ def main():
     service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
     owners = (list(dict.fromkeys([
         *calendar_ids(os.getenv("MEETING_CALENDAR_IDS", "")),
-        *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", "")),
+        *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", ""), allow_empty=True),
     ])) if service_account_email else ())
     output = work_once(source_key, destination, api_key, state, drive_credentials(),
                        service_account_email, owners)

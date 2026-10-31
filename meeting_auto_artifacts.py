@@ -21,10 +21,11 @@ ARTIFACT_FIELDS = (
 )
 
 
-def calendar_ids(raw):
-    """The explicit calendar allowlist is also the organizer allowlist."""
+def calendar_ids(raw, allow_empty=False):
+    """Validate organizer emails, including an optional secondary owner list."""
     ids = [value.strip().casefold() for value in raw.split(",") if value.strip()]
-    if not ids or len(ids) != len(set(ids)) or any("@" not in value for value in ids):
+    if ((not ids and not allow_empty) or len(ids) != len(set(ids))
+            or any("@" not in value for value in ids)):
         raise ValueError("MEETING_CALENDAR_IDS must contain unique calendar email addresses")
     return ids
 

@@ -176,7 +176,8 @@ def check_meetings():
     if service_account_email and calendar_raw:
         owners = calendar_ids(calendar_raw)
         file_owners = list(dict.fromkeys([
-            *owners, *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", ""))
+            *owners, *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", ""),
+                                   allow_empty=True)
         ]))
         direct_start_raw = os.getenv("MEET_API_START_TIME")
         direct_start = (datetime.fromisoformat(direct_start_raw.replace("Z", "+00:00"))
