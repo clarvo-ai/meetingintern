@@ -12,14 +12,40 @@ from audio_archive import (AudioGemini, drive_credentials, existing_archive_doc_
                            owner_drive_credentials, process_meeting)
 from meet_archive_discovery import meeting_from_record
 from meeting_auto_artifacts import calendar_ids
-from meeting_evidence import meet_client_for_user
+from company_reference import parse_company_references
+from meeting_evidence import (calendar_client, calendar_context, meet_client_for_user,
+                              parse_team_roster, source_evidence)
+from transcript_cleanup import CLEANUP_VERSION, parse_spelling_hints
 
 
 LOGGER = logging.getLogger(__name__)
 
 
+def cleanup_hints(meeting, source_drive, recording_drive, calendar, owners,
+                  roster=None, company_references=None, spelling_hints=None):
+    """Supply directory and uniquely matched event data only as spelling hints."""
+    context = {
+        "team_roster": list((roster or {}).values()),
+        "company_directory": [{"name": item["name"], "aliases": item.get("aliases", [])}
+                              for item in (company_references or [])],
+        "product_and_tool_names": spelling_hints or [],
+    }
+    if calendar:
+        try:
+            evidence = source_evidence(source_drive, list(meeting.context_doc_ids),
+                                       meeting.recording_id, recording_drive)
+            matched = calendar_context(calendar, owners, evidence)
+            context["source_speakers"] = evidence.get("speakers", [])
+            if matched.get("calendar_match") == "matched":
+                context["calendar_event"] = matched.get("calendar_event")
+        except Exception:
+            LOGGER.warning("Could not read optional calendar context for transcript cleanup")
+    return context
+
+
 def work_once(source_key, destination_folder_id, api_key, state, credentials,
-              service_account_email=None, owners=()):
+              service_account_email=None, owners=(), calendar=None, roster=None,
+              company_references=None, spelling_hints=None):
     """Re-check readiness at job start, then publish or release the claim."""
     data = state.claim_for_work(source_key)
     if not data:
@@ -78,19 +104,32 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials,
             return None
         existing = existing_archive_doc_id(drive, destination_folder_id, meeting)
         if existing:
+            metadata = drive.files().get(fileId=existing, fields="properties",
+                                         supportsAllDrives=True).execute()
+            if (metadata.get("properties") or {}).get("transcript_cleanup_version") != CLEANUP_VERSION:
+                state.mark_retry(source_key, "Existing transcript requires cleanup backfill", "processing")
+                return None
             state.mark_done(source_key, existing)
             return existing
+        source_drive = (owner_drive(meeting.source_owner_email)
+                        if meeting.source_conference_record else drive)
+        recording_drive = (owner_drive(meeting.recording_owner_email)
+                           if meeting.source_conference_record and meeting.recording_owner_email
+                           else source_drive)
+        cleanup_context = cleanup_hints(meeting, source_drive, recording_drive, calendar,
+                                        owners, roster, company_references, spelling_hints)
         gemini = AudioGemini(api_key, os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"))
         if meeting.source_conference_record:
             output = process_meeting(
                 drive, docs, credentials, gemini, destination_folder_id, meeting,
-                source_drive=owner_drive(meeting.source_owner_email),
+                source_drive=source_drive,
                 recording_credentials=(owner_credentials(meeting.recording_owner_email)
                                        if meeting.recording_owner_email else None),
+                cleanup_context=cleanup_context,
             )
         else:
-            output = process_meeting(drive, docs, credentials, gemini,
-                                     destination_folder_id, meeting)
+            output = process_meeting(drive, docs, credentials, gemini, destination_folder_id,
+                                     meeting, cleanup_context=cleanup_context)
         state.mark_done(source_key, output)
         return output
     except Exception as error:
@@ -112,8 +151,12 @@ def main():
         *calendar_ids(os.getenv("MEETING_CALENDAR_IDS", "")),
         *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", ""), allow_empty=True),
     ])) if service_account_email else ())
+    roster = parse_team_roster(os.getenv("MEETING_TEAM_ROSTER_JSON"))
+    references = parse_company_references(os.getenv("MEETING_COMPANY_REFERENCE_JSON"))
+    spelling_hints = parse_spelling_hints(os.getenv("MEETING_TRANSCRIPT_TERMS_JSON"))
     output = work_once(source_key, destination, api_key, state, drive_credentials(),
-                       service_account_email, owners)
+                       service_account_email, owners, calendar_client(owners), roster, references,
+                       spelling_hints)
     LOGGER.info("Finished archive work for %s; output Doc: %s", source_key, output)
 
 

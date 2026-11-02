@@ -160,6 +160,20 @@ class DispatchTests(unittest.TestCase):
         discover.assert_called_once_with(unittest.mock.ANY, ["notes-root", "video-root"])
         process.assert_called_once()
 
+    def test_existing_raw_archive_is_not_accepted_as_clean(self):
+        meeting = Meeting("key", "folder", "Demo", None, None, None,
+                          "source-doc", "Transcript", ("source-doc",))
+        state, drive = Mock(), Mock()
+        state.claim_for_work.return_value = {"source_root_ids": ["root"],
+                                              "source_notes_id": "source-doc"}
+        drive.files.return_value.get.return_value.execute.return_value = {"properties": {}}
+        with patch("archive_job.build", return_value=drive), \
+             patch("archive_job.find_meetings_across_roots", return_value=[meeting]), \
+             patch("archive_job.existing_archive_doc_id", return_value="existing"):
+            self.assertIsNone(archive_work_once("key", "destination", "key", state, Mock()))
+        state.mark_done.assert_not_called()
+        state.mark_retry.assert_called_once_with("key", "Existing transcript requires cleanup backfill", "processing")
+
     def test_direct_worker_rechecks_meet_record_and_reads_as_source_owner(self):
         meeting = Meeting(
             source_key="meet-key", folder_id="unshared-folder", folder_name="Test",
@@ -191,6 +205,37 @@ class DispatchTests(unittest.TestCase):
         discover.assert_called_once()
         self.assertIn("source_drive", process.call_args.kwargs)
         self.assertIn("recording_credentials", process.call_args.kwargs)
+
+    def test_cleanup_receives_roster_directory_and_matched_calendar_hints(self):
+        meeting = Meeting("meet-key", "folder", "Demo", "video", "Recording",
+                          60, "doc", "Transcript", ("doc",),
+                          source_owner_email="robert@clarvo.ai",
+                          recording_owner_email="robert@clarvo.ai",
+                          source_conference_record="conferenceRecords/one",
+                          meet_reader_email="robert@clarvo.ai")
+        state = Mock()
+        state.claim_for_work.return_value = {
+            "source_conference_record": "conferenceRecords/one",
+            "source_owner_email": "robert@clarvo.ai", "source_notes_id": "doc"}
+        roster = {"robert@clarvo.ai": "Robert Holmberg"}
+        references = [{"name": "Example", "aliases": ["Example Co"]}]
+        with patch("archive_job.build", return_value=Mock()), \
+             patch("archive_job.meet_client_for_user"), \
+             patch("archive_job.owner_drive_credentials", return_value=Mock()), \
+             patch("archive_job.meeting_from_record", return_value=meeting), \
+             patch("archive_job.existing_archive_doc_id", return_value=None), \
+             patch("archive_job.source_evidence", return_value={"speakers": ["Robert Holmberg"]}), \
+             patch("archive_job.calendar_context", return_value={"calendar_match": "matched",
+                                                                   "calendar_event": {"title": "Demo"}}), \
+             patch("archive_job.process_meeting", return_value="output") as process:
+            archive_work_once("meet-key", "destination", "key", state, Mock(),
+                              "drive@example.com", ["robert@clarvo.ai"], Mock(), roster, references,
+                              ["Codex"])
+        context = process.call_args.kwargs["cleanup_context"]
+        self.assertEqual(context["team_roster"], ["Robert Holmberg"])
+        self.assertEqual(context["company_directory"][0]["name"], "Example")
+        self.assertEqual(context["calendar_event"]["title"], "Demo")
+        self.assertEqual(context["product_and_tool_names"], ["Codex"])
 
     def test_root_groups_keep_owners_separate(self):
         self.assertEqual(source_groups(["juha", "robert"]), [["juha"], ["robert"]])

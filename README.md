@@ -36,6 +36,30 @@ shared-drive folder, with links to available source files. Source files are not
 modified or copied. The destination Doc stores a stable source key and source
 IDs as Drive properties to prevent duplicate output.
 
+Before publishing, Gemini cleans every transcript in bounded, overlapping text
+batches. The archive worker supplies the matching audio chunk when a timestamp
+is available, and uses the same `MEETING_TEAM_ROSTER_JSON` and
+`MEETING_COMPANY_REFERENCE_JSON` values as the analysis job for spelling hints.
+Calendar invitees are hints, not proof of attendance or who spoke. Source
+speaker and time boundaries are retained; only unambiguous full-name spelling
+matches are normalized. Incomplete responses, changed numbers or materially
+shortened segments are retried and then fail the archive job; an audio-backed,
+unresolved single-word turn can instead be marked `[unclear]`. Raw text is not
+published as a fallback. When audio alignment remains uncertain, an individual
+turn can be cleaned and audited again using only the source text. Set the roster environment variable and bind the
+company reference secret on the archive job when deploying this change. Optional
+`MEETING_TRANSCRIPT_TERMS_JSON` supplies verified product and tool names, for
+example `["Codex"]`; these are hints rather than proof of what was said.
+
+Existing archived Docs can be cleaned in place without changing their links.
+Run `python transcript_backfill.py --state-id <archive-state-id> --preview-dir <local-dir>`
+with the archive worker's credentials, destination, roster and company reference
+configuration to generate a local preview. `--all` selects completed archive
+records instead. Replace `--preview-dir` with `--apply-from <local-dir>` to apply
+the exact reviewed previews. The backfill verifies preview hashes and revision
+preconditions, leaves source Meet files alone, and refuses documents with
+complex formatting or multiple tabs.
+
 Recordings longer than eight hours are skipped. Video size is not capped:
 `ffmpeg` reads the MP4 through a local proxy backed by Google Drive byte-range
 requests, so only compressed audio chunks use temporary storage. The
