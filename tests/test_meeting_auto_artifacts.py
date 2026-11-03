@@ -38,6 +38,9 @@ class AutoRecordingTests(unittest.TestCase):
                          ["mark@clarvo.ai", "juha@clarvo.ai"])
         with self.assertRaises(ValueError):
             calendar_ids("mark@clarvo.ai,MARK@clarvo.ai")
+        self.assertEqual(calendar_ids("", allow_empty=True), [])
+        with self.assertRaises(ValueError):
+            calendar_ids("mark@clarvo.ai,MARK@clarvo.ai", allow_empty=True)
 
     def test_only_future_self_organized_meet_space_is_patched_once(self):
         events = [
@@ -86,6 +89,18 @@ class AutoRecordingTests(unittest.TestCase):
         self.assertEqual(result["already_on"], 1)
         self.assertEqual(result["updated"], 0)
         meet.spaces.return_value.patch.assert_not_called()
+
+    def test_current_organizer_can_enable_event_created_under_old_alias(self):
+        calendar = calendar_with([event(
+            "weekly-recap", organizer="mark@clarvo.ai", creator="mark@old.example",
+            code="klm-nopq-rst")])
+        meet = Mock()
+        meet.spaces.return_value.get.return_value.execute.return_value = {
+            "name": "spaces/recap", "config": {"artifactConfig": {}}}
+        result = enable_upcoming_artifacts(calendar, lambda owner: meet,
+                                           ["mark@clarvo.ai"], now=NOW)
+        self.assertEqual(result["updated"], 1)
+        meet.spaces.return_value.get.assert_called_once_with(name="spaces/klm-nopq-rst")
 
     def test_existing_transcript_and_notes_only_patch_recording(self):
         calendar = calendar_with([event("juha-test")])

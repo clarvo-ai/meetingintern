@@ -65,6 +65,7 @@ class Meeting:
     recording_owner_email: str | None = None
     source_conference_record: str | None = None
     meet_reader_email: str | None = None
+    started_at: datetime | None = None
 
 
 def drive_credentials(impersonate_service_account=None):
@@ -257,6 +258,7 @@ def find_meetings_in_folders(drive, folders, minimum_age_minutes=5, now=None, no
             notes_id=notes["id"], notes_name=notes["name"],
             context_doc_ids=tuple(item["id"] for item in candidates),
             recording_folder_id=recording["source_folder_id"] if recording else None,
+            started_at=doc_created,
         )
         if not recording and not export_transcript(drive, meeting):
             LOGGER.info("Waiting for a transcript or recording in folder %s", notes_folder_id)
@@ -480,12 +482,14 @@ class AudioGemini:
         self.model = model
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20), reraise=True)
-    def _ask(self, prompt, audio_file, max_output_tokens):
+    def _ask(self, prompt, audio_file, max_output_tokens, response_schema=None):
         response = self.client.models.generate_content(
             model=self.model,
             contents=[prompt, audio_file],
             config=types.GenerateContentConfig(
                 temperature=0, max_output_tokens=max_output_tokens,
+                response_mime_type="application/json" if response_schema else None,
+                response_schema=response_schema,
             ),
         )
         if not response.text or not response.text.strip():
@@ -495,7 +499,7 @@ class AudioGemini:
             raise RuntimeError("Gemini transcript exceeded the output limit")
         return response.text.strip()
 
-    def _with_uploaded_audio(self, path, prompt, max_output_tokens):
+    def _with_uploaded_audio(self, path, prompt, max_output_tokens, response_schema=None):
         uploaded = self.client.files.upload(file=str(path))
         try:
             # Larger audio uploads may remain PROCESSING briefly after upload.
@@ -508,7 +512,7 @@ class AudioGemini:
                 time.sleep(2)
             else:
                 raise TimeoutError("Gemini audio upload did not become active")
-            return self._ask(prompt, uploaded, max_output_tokens)
+            return self._ask(prompt, uploaded, max_output_tokens, response_schema=response_schema)
         finally:
             try:
                 self.client.files.delete(name=uploaded.name)
@@ -516,13 +520,15 @@ class AudioGemini:
                 LOGGER.warning("Could not delete temporary Gemini upload %s", uploaded.name)
 
     @retry(stop=stop_after_attempt(3), wait=wait_exponential(min=2, max=20), reraise=True)
-    def _ask_text(self, prompt, max_output_tokens):
+    def _ask_text(self, prompt, max_output_tokens, response_schema=None):
         """Use a second text pass when audio transcription ignores English output."""
         response = self.client.models.generate_content(
             model=self.model,
             contents=prompt,
             config=types.GenerateContentConfig(
                 temperature=0, max_output_tokens=max_output_tokens,
+                response_mime_type="application/json" if response_schema else None,
+                response_schema=response_schema,
             ),
         )
         if not response.text or not response.text.strip():
@@ -603,10 +609,12 @@ class AudioGemini:
 
 def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, method):
     """Publish only after transcription succeeds; remove an incomplete draft."""
+    from transcript_cleanup import CLEANUP_VERSION
     title = f"{meeting.folder_name} - English Transcript"
     properties = {
         "source_key": meeting.source_key,
         "transcription_method": method,
+        "transcript_cleanup_version": CLEANUP_VERSION,
     }
     if meeting.notes_id:
         properties["source_notes_id"] = meeting.notes_id
@@ -638,8 +646,10 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
 
 
 def process_meeting(drive, docs, credentials, gemini, destination_folder_id, meeting,
-                    source_drive=None, recording_credentials=None):
-    """Write one shared transcript from audio or the three-hour Doc fallback."""
+                    source_drive=None, recording_credentials=None, cleanup_context=None):
+    """Publish only the cleaned transcript after every section passes validation."""
+    # Only the archive worker needs the cleanup module; the checker imports this file too.
+    from transcript_cleanup import clean_transcript
     source_drive = source_drive or drive
     recording_credentials = recording_credentials or credentials
     if not meeting.recording_id:
@@ -647,6 +657,7 @@ def process_meeting(drive, docs, credentials, gemini, destination_folder_id, mee
         method = "Google Meet transcript (recording unavailable after three hours)"
         if not transcript:
             raise RuntimeError(f"Meet document {meeting.notes_id} has no transcript yet")
+        transcript = clean_transcript(transcript, gemini, cleanup_context)
     else:
         if duration_exceeds_limit(meeting.duration_seconds):
             return None
@@ -669,11 +680,15 @@ def process_meeting(drive, docs, credentials, gemini, destination_folder_id, mee
             else:
                 transcript = gemini.translate_chunks(chunks, person_context(source_drive, meeting))
                 method = "Gemini audio transcription and English translation"
+            if transcript:
+                transcript = clean_transcript(transcript, gemini, cleanup_context,
+                                              audio_chunks=chunks, chunk_seconds=CHUNK_SECONDS)
     if not transcript:
         if meeting.recording_id:
             return None
         raise RuntimeError(f"No transcript for Meet document {meeting.notes_id}")
-    return create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, method)
+    return create_archive_doc(drive, docs, destination_folder_id, meeting, transcript,
+                              f"{method}; AI-cleaned")
 
 
 def run_archive(source_folder_id, destination_folder_id, api_key,

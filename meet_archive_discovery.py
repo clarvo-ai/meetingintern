@@ -63,8 +63,6 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
     raw_transcripts = list(_pages(
         lambda token: meet.conferenceRecords().transcripts().list(
             parent=name, pageSize=100, pageToken=token), "transcripts"))
-    if any(item.get("state") in ("STARTED", "ENDED") for item in raw_transcripts):
-        return None
     transcript_artifacts = [item for item in raw_transcripts
         if item.get("state") == "FILE_GENERATED"
         and item.get("docsDestination", {}).get("document")]
@@ -83,8 +81,6 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
     recording_artifacts = list(_pages(
         lambda token: meet.conferenceRecords().recordings().list(
             parent=name, pageSize=100, pageToken=token), "recordings"))
-    if any(item.get("state") in ("STARTED", "ENDED") for item in recording_artifacts):
-        return None
     recordings = [item for item in recording_artifacts
         if item.get("state") == "FILE_GENERATED"
         and item.get("driveDestination", {}).get("file")]
@@ -131,6 +127,7 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
         recording_owner_email=recording["source_owner_email"] if recording else None,
         source_conference_record=name,
         meet_reader_email=preferred[0] if preferred else (notes or recording)["source_owner_email"],
+        started_at=_timestamp(record.get("startTime") or (notes or recording)["createdTime"]),
     )
     if not recording and not export_transcript(drive_factory(meeting.source_owner_email), meeting):
         return None
@@ -138,7 +135,7 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
 
 
 def find_meet_meetings(meet_factory, drive_factory, owners, now=None,
-                       not_before=None, errors=None):
+                       not_before=None, errors=None, file_owners=None):
     """Union visible conferences, then resolve actual Drive ownership once."""
     now = now or datetime.now(timezone.utc)
     errors = errors if errors is not None else []
@@ -161,7 +158,7 @@ def find_meet_meetings(meet_factory, drive_factory, owners, now=None,
     for record, preferred in records.values():
         try:
             yield meeting_from_record(record, clients[preferred[0]], drive_factory,
-                                      owners, preferred, now, not_before)
+                                      file_owners or owners, preferred, now, not_before)
         except Exception:
             LOGGER.exception("Could not inspect Meet artifacts for %s", record["name"])
             errors.append(f"artifacts:{record['name']}")

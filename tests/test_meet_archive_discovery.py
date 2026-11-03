@@ -4,7 +4,7 @@ import unittest
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
 
-from meet_archive_discovery import meeting_from_record
+from meet_archive_discovery import find_meet_meetings, meeting_from_record
 
 
 NOW = datetime(2026, 10, 29, 12, 0, tzinfo=timezone.utc)
@@ -73,18 +73,41 @@ class MeetDiscoveryTests(unittest.TestCase):
                                               lambda _owner: self.drive, OWNERS,
                                               now=NOW))
 
+    def test_approved_additional_file_owner_does_not_expand_meet_scan(self):
+        self.doc["owners"] = [{"emailAddress": "juho@clarvo.ai"}]
+        self.video["owners"] = [{"emailAddress": "juho@clarvo.ai"}]
+        self.record["startTime"] = stamp(timedelta(hours=4))
+        self.meet.conferenceRecords.return_value.list.return_value.execute.return_value = {
+            "conferenceRecords": [self.record]}
+        meet_factory = Mock(return_value=self.meet)
+        meetings = list(find_meet_meetings(
+            meet_factory, lambda _owner: self.drive, ["robert@clarvo.ai"],
+            now=NOW, file_owners=["robert@clarvo.ai", "juho@clarvo.ai"]))
+        self.assertEqual(len(meetings), 1)
+        self.assertEqual(meetings[0].source_owner_email, "juho@clarvo.ai")
+        meet_factory.assert_called_once_with("robert@clarvo.ai")
+
     def test_visible_recording_blocks_doc_fallback_until_settled(self):
         self.video["modifiedTime"] = stamp(timedelta(minutes=1))
         self.assertIsNone(meeting_from_record(self.record, self.meet,
                                               lambda _owner: self.drive, OWNERS,
                                               now=NOW))
 
-    def test_unfinished_recording_blocks_doc_fallback_after_three_hours(self):
+    def test_ended_recording_falls_back_to_doc_after_three_hours(self):
         self.meet.conferenceRecords.return_value.recordings.return_value.list.return_value.execute.return_value = {
             "recordings": [{"state": "ENDED"}]}
-        self.assertIsNone(meeting_from_record(self.record, self.meet,
-                                              lambda _owner: self.drive, OWNERS,
-                                              now=NOW))
+        with patch("meet_archive_discovery.export_transcript", return_value="Hello"):
+            meeting = meeting_from_record(self.record, self.meet,
+                                          lambda _owner: self.drive, OWNERS, now=NOW)
+        self.assertIsNone(meeting.recording_id)
+
+    def test_ended_transcript_falls_back_to_recording_after_three_hours(self):
+        self.meet.conferenceRecords.return_value.transcripts.return_value.list.return_value.execute.return_value = {
+            "transcripts": [{"state": "ENDED"}]}
+        meeting = meeting_from_record(self.record, self.meet,
+                                      lambda _owner: self.drive, OWNERS, now=NOW)
+        self.assertIsNone(meeting.notes_id)
+        self.assertEqual(meeting.recording_id, "video")
 
     def test_recording_without_transcript_becomes_ready_after_three_hours(self):
         self.meet.conferenceRecords.return_value.transcripts.return_value.list.return_value.execute.return_value = {}

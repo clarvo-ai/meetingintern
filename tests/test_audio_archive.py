@@ -132,6 +132,13 @@ class MeetingDiscoveryTests(unittest.TestCase):
 
 
 class ProcessingTests(unittest.TestCase):
+    def setUp(self):
+        patcher = patch("transcript_cleanup.clean_transcript",
+                        side_effect=lambda text, *_args, **_kwargs: "Cleaned " + text)
+        self.clean_patcher = patcher
+        self.cleanup = patcher.start()
+        self.addCleanup(patcher.stop)
+
     def meeting(self, recording_id="video"):
         return Meeting("key", "folder", "Test", recording_id, "Recording" if recording_id else None,
                        60 if recording_id else None, "notes", "Transcript", ("notes",))
@@ -162,7 +169,9 @@ class ProcessingTests(unittest.TestCase):
             proxy.return_value.__enter__.return_value = "recording-url"
             output = process_meeting(None, None, None, gemini, "destination", self.meeting())
         self.assertEqual(output, "output")
-        self.assertEqual(create.call_args.args[-2:], ("Meet words", "Google Meet transcript (English)"))
+        self.assertEqual(create.call_args.args[-2:],
+                         ("Cleaned Meet words", "Google Meet transcript (English); AI-cleaned"))
+        self.assertEqual(self.cleanup.call_args.kwargs["audio_chunks"], ["chunk"])
         gemini.translate_chunks.assert_not_called()
 
     def test_non_english_recording_uses_audio_and_name_hints(self):
@@ -180,7 +189,7 @@ class ProcessingTests(unittest.TestCase):
         gemini.translate_chunks.assert_called_once_with(["chunk"], "Juha, juha@clarvo.ai")
         export.assert_not_called()
         self.assertEqual(create.call_args.args[-2:],
-                         ("Translated speech", "Gemini audio transcription and English translation"))
+                         ("Cleaned Translated speech", "Gemini audio transcription and English translation; AI-cleaned"))
 
     def test_missing_recording_uses_transcript_without_audio(self):
         gemini = Mock()
@@ -216,7 +225,46 @@ class ProcessingTests(unittest.TestCase):
                                      "destination", meeting)
         self.assertEqual(output, "output")
         gemini.translate_chunks.assert_called_once_with(["chunk"])
-        self.assertEqual(create.call_args.args[-1], "Gemini audio transcription (English fallback)")
+        self.assertEqual(create.call_args.args[-1], "Gemini audio transcription (English fallback); AI-cleaned")
+
+    def test_failed_cleanup_never_publishes_a_raw_transcript(self):
+        self.cleanup.side_effect = RuntimeError("Cleanup failed")
+        with patch("audio_archive.export_transcript", return_value="Raw speech"), \
+             patch("audio_archive.create_archive_doc") as create:
+            with self.assertRaisesRegex(RuntimeError, "Cleanup failed"):
+                process_meeting(None, None, None, Mock(), "destination", self.meeting(None))
+        create.assert_not_called()
+
+    def test_complete_archive_path_writes_clean_speech_and_preserves_source(self):
+        import json
+        self.clean_patcher.stop()
+        company, source, docs, gemini = Mock(), Mock(), Mock(), Mock()
+        raw = ("Demo - Transcript\n00:00:00\nMiro: Inner Sense wants 3 seats.\n"
+               "Transcription ended after 00:01:00\n")
+        source.files.return_value.export.return_value.execute.return_value = raw.encode()
+        company.files.return_value.create.return_value.execute.return_value = {"id": "clean-doc"}
+
+        def cleaned_reply(prompt, _limit, **_kwargs):
+            from transcript_cleanup import CleanupAudit
+            if issubclass(_kwargs["response_schema"], CleanupAudit):
+                segments = json.loads(prompt.rsplit("Audit segments: ", 1)[1])
+                return json.dumps({"segments": [{"id": item["id"], "faithful": True}
+                                                 for item in segments]})
+            segments = json.loads(prompt.rsplit("Segments: ", 1)[1])
+            return json.dumps({"segments": [{"id": item["id"],
+                                              "text": item["text"].replace("Inner Sense", "Enersense")}
+                                             for item in segments]})
+        gemini._ask_text.side_effect = cleaned_reply
+        output = process_meeting(company, docs, Mock(), gemini, "destination", self.meeting(None),
+                                 source_drive=source, cleanup_context={"company_directory": ["Enersense"]})
+        self.assertEqual(output, "clean-doc")
+        content = docs.documents.return_value.batchUpdate.call_args.kwargs["body"]["requests"][0]["insertText"]["text"]
+        self.assertIn("00:00:00\nMiro: Enersense wants 3 seats.", content)
+        self.assertNotIn("Inner Sense", content)
+        self.assertIn("AI-cleaned", content)
+        self.assertEqual(company.files.return_value.create.call_args.kwargs["body"]["properties"]
+                         ["transcript_cleanup_version"], "1")
+        source.files.return_value.update.assert_not_called()
 
     def test_recording_only_idempotency_does_not_match_unrelated_missing_note(self):
         from audio_archive import existing_archive_doc_id

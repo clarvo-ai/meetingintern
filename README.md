@@ -19,8 +19,8 @@ both unchanged for five minutes. If a recording has not appeared three hours aft
 the Doc was created, they archive the settled Meet transcript alone. The Meet
 API path also handles a generated recording with no Meet transcript: after
 three hours it transcribes the recording audio with Gemini and creates the
-English transcript. A visible but unfinished recording is allowed to settle
-before processing. Shortcuts in the folder fallback are
+English transcript. Meet API artifacts stuck in `STARTED` or `ENDED` wait the
+same three hours before the available Doc or recording is used alone. Shortcuts in the folder fallback are
 followed only when the service account can read their targets. Recurring
 meeting folders are matched by the meeting timestamp in file names. Multiple
 Google Meet roots for one owner can be grouped so a Doc in one root pairs with
@@ -35,6 +35,30 @@ audio transcription. The output is a new Google Doc in the configured
 shared-drive folder, with links to available source files. Source files are not
 modified or copied. The destination Doc stores a stable source key and source
 IDs as Drive properties to prevent duplicate output.
+
+Before publishing, Gemini cleans every transcript in bounded, overlapping text
+batches. The archive worker supplies the matching audio chunk when a timestamp
+is available, and uses the same `MEETING_TEAM_ROSTER_JSON` and
+`MEETING_COMPANY_REFERENCE_JSON` values as the analysis job for spelling hints.
+Calendar invitees are hints, not proof of attendance or who spoke. Source
+speaker and time boundaries are retained; only unambiguous full-name spelling
+matches are normalized. Incomplete responses, changed numbers or materially
+shortened segments are retried and then fail the archive job; an audio-backed,
+unresolved single-word turn can instead be marked `[unclear]`. Raw text is not
+published as a fallback. When audio alignment remains uncertain, an individual
+turn can be cleaned and audited again using only the source text. Set the roster environment variable and bind the
+company reference secret on the archive job when deploying this change. Optional
+`MEETING_TRANSCRIPT_TERMS_JSON` supplies verified product and tool names, for
+example `["Codex"]`; these are hints rather than proof of what was said.
+
+Existing archived Docs can be cleaned in place without changing their links.
+Run `python transcript_backfill.py --state-id <archive-state-id> --preview-dir <local-dir>`
+with the archive worker's credentials, destination, roster and company reference
+configuration to generate a local preview. `--all` selects completed archive
+records instead. Replace `--preview-dir` with `--apply-from <local-dir>` to apply
+the exact reviewed previews. The backfill verifies preview hashes and revision
+preconditions, leaves source Meet files alone, and refuses documents with
+complex formatting or multiple tabs.
 
 Recordings longer than eight hours are skipped. Video size is not capped:
 `ffmpeg` reads the MP4 through a local proxy backed by Google Drive byte-range
@@ -69,10 +93,14 @@ timezone when first enabling API discovery; this avoids an unintended backfill
 of historical test meetings. The existing `ARCHIVE_START_TIME` still limits the
 folder fallback. Keep the existing
 organizer and Chat summary pipeline configured separately.
+The checker dispatches one ready analysis at a time, oldest meeting first;
+an active or retrying older brief holds newer Chat posts until it resolves.
 The analysis job uses the same delegated source reads for speaker evidence, so
 newly discovered files need no folder share for report context. Only artifacts
-actually owned by the configured accounts are eligible; an external organizer's
-recording visible to an invitee is not archived. Meet conference records expire
+actually owned by `MEETING_CALENDAR_IDS` or the optional
+`MEETING_ADDITIONAL_FILE_OWNERS` accounts are eligible; the latter grants file
+access without enabling automatic recording on that person's calendar. An
+external organizer's recording visible to an invitee is not archived. Meet conference records expire
 after 30 days, so the checker scans the most recent 14 days and the folder
 fallback remains useful for older or otherwise absent API records.
 
@@ -83,7 +111,8 @@ Cloud Scheduler job. Set `MEETING_CALENDAR_IDS` to the primary calendars that
 the service account can read and `MEETING_MEET_SERVICE_ACCOUNT_EMAIL` to the
 delegated service account. The route looks at confirmed events starting in the
 next 24 hours. It only changes Calendar-created Meet spaces when the event
-organizer and creator both match the configured primary calendar. Invitations,
+organizer matches the configured primary calendar. The original creator may be
+an older email address after an event or domain migration. Invitations,
 past meetings, and events without a Calendar Meet conference ID are ignored.
 For each eligible space, it enables automatic recording, transcription, and
 Gemini notes if needed, leaving unrelated Meet settings unchanged. A repeated

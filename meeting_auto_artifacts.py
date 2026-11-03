@@ -21,10 +21,11 @@ ARTIFACT_FIELDS = (
 )
 
 
-def calendar_ids(raw):
-    """The explicit calendar allowlist is also the organizer allowlist."""
+def calendar_ids(raw, allow_empty=False):
+    """Validate organizer emails, including an optional secondary owner list."""
     ids = [value.strip().casefold() for value in raw.split(",") if value.strip()]
-    if not ids or len(ids) != len(set(ids)) or any("@" not in value for value in ids):
+    if ((not ids and not allow_empty) or len(ids) != len(set(ids))
+            or any("@" not in value for value in ids)):
         raise ValueError("MEETING_CALENDAR_IDS must contain unique calendar email addresses")
     return ids
 
@@ -49,7 +50,7 @@ def meet_settings_client(service_account_email, organizer_email, source_credenti
 
 
 def upcoming_owned_events(calendar, owner_email, now):
-    """Expand recurring events and ignore invitations organized by someone else."""
+    """Expand recurring events and use their current organizer as the owner."""
     page_token = None
     while True:
         response = calendar.events().list(
@@ -60,7 +61,7 @@ def upcoming_owned_events(calendar, owner_email, now):
             maxResults=250,
             pageToken=page_token,
             fields=("nextPageToken,items(id,status,start(dateTime),organizer(email),"
-                    "creator(email),conferenceData(conferenceId,conferenceSolution(key(type))))"),
+                    "conferenceData(conferenceId,conferenceSolution(key(type))))"),
         ).execute()
         for event in response.get("items", []):
             if event.get("status") != "confirmed":
@@ -69,8 +70,7 @@ def upcoming_owned_events(calendar, owner_email, now):
             if not start or datetime.fromisoformat(start.replace("Z", "+00:00")) <= now:
                 continue
             organizer = event.get("organizer", {}).get("email", "").casefold()
-            creator = event.get("creator", {}).get("email", "").casefold()
-            if organizer != owner_email or (creator and creator != owner_email):
+            if organizer != owner_email:
                 continue
             conference = event.get("conferenceData", {})
             if conference.get("conferenceSolution", {}).get("key", {}).get("type") != "hangoutsMeet":

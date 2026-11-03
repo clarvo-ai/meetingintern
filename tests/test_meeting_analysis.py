@@ -220,6 +220,31 @@ class BriefTests(unittest.TestCase):
         source_evidence.assert_called_once_with(
             robert_drive, ["source-doc"], "source-video", recording_drive=mark_drive)
 
+    def test_additional_file_owner_supplies_source_evidence_without_calendar_scan(self):
+        state = Mock()
+        state.claim_for_work.return_value = {
+            "output_doc_id": "transcript", "source_notes_id": "source-doc",
+            "source_recording_id": "source-video",
+            "source_owner_email": "juho@clarvo.ai",
+            "recording_owner_email": "juho@clarvo.ai",
+        }
+        drive = Mock()
+        drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "transcript", "name": "Demo - English Transcript", "parents": ["shared-folder"]}
+        drive.files.return_value.export.return_value.execute.return_value = (
+            b"Method: Meet transcript\n\nSomeone: We should review the plan.\n")
+        owner_drive = Mock()
+        with patch("analysis_job.source_evidence", return_value={}) as source_evidence, \
+             patch("analysis_job.generate_report", return_value=BRIEF), \
+             patch("analysis_job.create_or_find_brief", return_value="brief"), \
+             patch("analysis_job.post_chat_message", return_value="message"):
+            work_once("source-key", state, drive, Mock(), "key", "webhook", "MEETINGS",
+                      calendar_ids=("robert@clarvo.ai",),
+                      source_drive_factory=lambda _owner: owner_drive,
+                      file_owner_ids=("juho@clarvo.ai",))
+        source_evidence.assert_called_once_with(
+            owner_drive, ["source-doc"], "source-video", recording_drive=owner_drive)
+
     def test_uncertain_chat_delivery_is_not_retried(self):
         from meeting_analysis import ChatDeliveryUncertain
         state = Mock()

@@ -54,13 +54,15 @@ def launch_analysis_job(job_name, source_key):
 
 def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
                            launch=launch_analysis_job):
-    """Dispatch briefs independently from long audio archive work."""
+    """Launch only the oldest analysis, preserving Chat order across checks."""
     dispatched = []
     for source_key in state.candidates():
-        if len(dispatched) >= dispatch_limit:
+        if dispatch_limit <= 0:
             break
         if not state.reserve_for_dispatch(source_key):
-            continue
+            # The oldest meeting is active or waiting to retry; later briefs
+            # must not overtake it in the Chat space.
+            break
         try:
             execution = launch(job_name, source_key)
             state.mark_queued(source_key, execution)
@@ -68,6 +70,7 @@ def dispatch_analysis_jobs(state, job_name, dispatch_limit=5,
         except Exception as error:
             state.mark_retry(source_key, error, "dispatching")
             LOGGER.exception("Could not launch analysis job for %s", source_key)
+        break
     return dispatched
 
 
@@ -172,6 +175,10 @@ def check_meetings():
     calendar_raw = os.getenv("MEETING_CALENDAR_IDS")
     if service_account_email and calendar_raw:
         owners = calendar_ids(calendar_raw)
+        file_owners = list(dict.fromkeys([
+            *owners, *calendar_ids(os.getenv("MEETING_ADDITIONAL_FILE_OWNERS", ""),
+                                   allow_empty=True)
+        ]))
         direct_start_raw = os.getenv("MEET_API_START_TIME")
         direct_start = (datetime.fromisoformat(direct_start_raw.replace("Z", "+00:00"))
                         if direct_start_raw else not_before)
@@ -190,7 +197,7 @@ def check_meetings():
             direct_meetings = [meeting for meeting in find_meet_meetings(
                 lambda owner: meet_client_for_user(service_account_email, owner),
                 source_drive, owners, not_before=max(not_before, direct_start),
-                errors=direct_errors) if meeting]
+                errors=direct_errors, file_owners=file_owners) if meeting]
         except Exception:
             LOGGER.exception("Meet API discovery failed; continuing with shared Drive folders")
             direct_errors.append("unexpected")
