@@ -186,10 +186,12 @@ class BriefTests(unittest.TestCase):
              patch("analysis_job.create_or_find_brief", return_value="brief") as create, \
              patch("analysis_job.post_chat_message", return_value="message") as post:
             result = work_once("source-key", state, drive, Mock(), "key", "webhook",
-                               "MEETINGS", company_references=[{"name": "Example"}])
+                               "MEETINGS", company_references=[{"name": "Example"}],
+                               spelling_hints=["ExampleTool"])
         self.assertEqual(result, "brief")
         self.assertEqual(generate.call_args.args[0], "key")
         self.assertEqual(generate.call_args.args[-1], [{"name": "Example"}])
+        self.assertEqual(generate.call_args.kwargs["spelling_hints"], ["ExampleTool"])
         self.assertEqual(create.call_args.kwargs["schema_version"], "2")
         self.assertIn("Full transcript", post.call_args.args[-1])
         self.assertIn("#operations", post.call_args.args[-1])

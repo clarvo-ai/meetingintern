@@ -138,10 +138,14 @@ The analysis job reads the full archived transcript and uses Gemini
 `gemini-3.5-flash-lite` in focused passes for questions and replies, discussed
 next steps, and a detailed narrative. Every pass receives the complete spoken
 transcript; audio chunking remains an earlier, separate step. The report pairs
-external questions with Clarvo's actual answer or an open status. Agreed,
-proposed, and unclear next steps remain labeled as meeting notes to verify.
-An individual owner is only used when the original Meet transcript provides a
-named speaker and the discussion supports the assignment. The job creates a
+questions in both directions with the actual reply or an open status, and lists
+discussed problems separately. Next steps use short action lines and optional
+reasons, with proposed or unclear items marked as meeting notes to verify.
+The analysis job can use the same optional `MEETING_TRANSCRIPT_TERMS_JSON`
+vocabulary as the archive job for grounded product and tool spellings.
+A person is attributed only when the summarized speech contains a named speaker
+label backed by the original Meet transcript and the discussion supports the
+assignment. The job creates a
 companion `Meeting Brief` Doc in the same shared folder; the full English
 transcript Doc stays untouched. Firestore stores the type, tags, brief ID, and
 delivery status for later reporting and safe retries.
