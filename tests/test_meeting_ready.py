@@ -9,6 +9,7 @@ from unittest.mock import Mock, patch
 
 from analysis_job import work_once
 from analysis_state import AnalysisState
+from archive_state import ArchiveState
 from meeting_ready import WEBHOOK_URL, load_config, make_event, validate_event
 from meeting_ready_worker import MeetingReadyOutbox, _id_token, deliver, run_once
 
@@ -45,20 +46,28 @@ class Transaction:
     def update(self, ref, values):
         ref.data.update(values)
 
+    def set(self, ref, values, merge=False):
+        ref.data.update(values)
+
 
 class Collection:
     def __init__(self):
         self.refs = {}
+        self.query = None
 
     def document(self, key):
         return self.refs.setdefault(key, Reference(key))
 
-    def where(self, **_kwargs):
+    def where(self, **kwargs):
+        self.query = kwargs["filter"]
         return self
 
     def stream(self):
+        expected = self.query.value
         return [ref.get() for ref in self.refs.values()
-                if ref.data.get("meeting_ready_status") in ("pending", "sending")]
+                if (ref.data.get(self.query.field_path) in expected
+                    if self.query.op_string == "in" else
+                    ref.data.get(self.query.field_path) == expected)]
 
 
 class Client:
@@ -96,6 +105,7 @@ class ContractTests(unittest.TestCase):
                                  "transcript_file_id": "transcript_123", "brief_file_id": "brief_123"})
         for bad in ({**event, "text": "private"}, {**event, "meeting_id": "b" * 64},
                     {**event, "event_id": KEY.upper()}, {**event, "brief_file_id": "x@example.com"},
+                    {**event, "brief_file_id": event["transcript_file_id"]},
                     {**event, "schema_version": True}):
             with self.subTest(bad=bad), self.assertRaises(ValueError):
                 validate_event(bad)
@@ -106,7 +116,7 @@ class ContractTests(unittest.TestCase):
         self.assertIsNone(make_event(KEY, archive(first_seen=None), "brief", CONFIG))
         self.assertIsNone(make_event(KEY, archive(verified=None), "brief", CONFIG))
         self.assertIsNone(make_event(KEY, archive(verified=CUTOFF - timedelta(seconds=1)), "brief", CONFIG))
-        self.assertIsNone(make_event(KEY, archive(start=datetime(2026, 11, 5)), "brief", CONFIG))
+        self.assertIsNotNone(make_event(KEY, archive(start=datetime(2026, 11, 5)), "brief", CONFIG))
         self.assertIsNone(make_event(KEY, {**archive(), "status": "processing"}, "brief", CONFIG))
         self.assertIsNotNone(make_event(KEY, archive(start=CUTOFF, first_seen=CUTOFF), "brief", CONFIG))
 
@@ -195,7 +205,116 @@ class OutboxTests(unittest.TestCase):
         self.ref.data["output_doc_id"] = "invalid@example.com"
         self.save()
         self.assertNotIn("meeting_ready_event", self.ref.data)
+        self.assertEqual(self.ref.data["meeting_ready_status"], "review")
+        self.assertEqual(self.ref.data["meeting_ready_reason"], "invalid_transcript_file_id")
         self.assertEqual(self.ref.data["analysis_brief_doc_id"], "brief_123")
+
+    def test_unknown_time_and_bad_ids_are_queryable_without_chat_changes(self):
+        self.ref.data.update({"meeting_ready_verified_start_at": None, "analysis_status": "posted",
+                              "analysis_chat_message_name": "chat-message"})
+        self.save()
+        self.assertEqual((self.ref.data["meeting_ready_status"], self.ref.data["meeting_ready_reason"]),
+                         ("review", "missing_verified_start"))
+        self.assertEqual(self.ref.data["analysis_status"], "posted")
+        self.assertEqual(self.ref.data["analysis_chat_message_name"], "chat-message")
+        self.ref.data["meeting_ready_verified_start_at"] = CUTOFF + timedelta(minutes=1)
+        self.ref.data["output_doc_id"] = "brief_123"
+        self.save()
+        self.assertEqual((self.ref.data["meeting_ready_status"], self.ref.data["meeting_ready_reason"]),
+                         ("review", "identical_file_ids"))
+
+    def test_old_meeting_is_excluded_even_when_other_evidence_is_missing(self):
+        self.ref.data.update({"meeting_started_at": CUTOFF - timedelta(days=1),
+                              "meeting_ready_verified_start_at": None})
+        self.save()
+        self.assertEqual((self.ref.data["meeting_ready_status"], self.ref.data["meeting_ready_reason"]),
+                         ("excluded", "pre_cutover"))
+        self.assertNotIn("meeting_ready_event", self.ref.data)
+
+    def test_manual_reconciliation_preserves_chat_and_only_changes_outbox(self):
+        self.ref.data.update({"meeting_ready_verified_start_at": None, "analysis_status": "posted",
+                              "analysis_chat_message_name": "chat-message"})
+        self.save()
+        self.assertEqual(self.outbox.reconcile(KEY, CONFIG, manual=True), "review")
+        self.assertEqual(self.outbox.reconcile(KEY, CONFIG, manual=True,
+            verified_start=CUTOFF + timedelta(minutes=1), transcript_file_id="repaired_transcript"), "pending")
+        self.assertEqual(self.ref.data["meeting_ready_event"]["transcript_file_id"], "repaired_transcript")
+        self.assertEqual(self.ref.data["output_doc_id"], "transcript_123")
+        self.assertEqual(self.ref.data["analysis_status"], "posted")
+        self.assertEqual(self.ref.data["analysis_chat_message_name"], "chat-message")
+        self.assertIsNone(self.outbox.reconcile(KEY, CONFIG, manual=True, brief_file_id="other"))
+
+    def test_manual_review_cannot_override_pre_cutover_evidence(self):
+        self.ref.data.update({"meeting_ready_status": "review", "analysis_brief_doc_id": "brief_123",
+                              "analysis_payload": self.payload,
+                              "meeting_ready_verified_start_at": CUTOFF - timedelta(minutes=1)})
+        self.assertEqual(self.outbox.reconcile(KEY, CONFIG, manual=True,
+                         verified_start=CUTOFF + timedelta(days=1)), "excluded")
+        self.assertNotIn("meeting_ready_event", self.ref.data)
+
+    def test_review_corrections_survive_until_all_problems_are_fixed(self):
+        self.ref.data.update({"meeting_ready_verified_start_at": None, "output_doc_id": "bad@email"})
+        self.save()
+        self.assertEqual(self.outbox.reconcile(KEY, CONFIG, manual=True,
+                         verified_start=CUTOFF + timedelta(minutes=1)), "review")
+        self.assertEqual(self.ref.data["meeting_ready_reason"], "invalid_transcript_file_id")
+        self.assertEqual(self.ref.data["meeting_ready_verified_start_at"], CUTOFF + timedelta(minutes=1))
+        with self.assertRaises(ValueError):
+            self.outbox.reconcile(KEY, CONFIG, manual=True, transcript_file_id="bad@email")
+        self.assertEqual(self.outbox.reconcile(KEY, CONFIG, manual=True,
+                         transcript_file_id="fixed_transcript"), "pending")
+        self.assertEqual(self.ref.data["meeting_ready_event"]["transcript_file_id"], "fixed_transcript")
+
+    def test_invalid_brief_and_source_key_have_safe_reason_codes(self):
+        self.analysis.save_brief(KEY, "bad@example.com", self.payload, "Chat", ready_config=CONFIG)
+        self.assertEqual(self.ref.data["meeting_ready_reason"], "invalid_brief_file_id")
+        invalid = self.collection.document("invalid-key")
+        invalid.data.update(archive())
+        self.analysis.save_brief("invalid-key", "brief_123", self.payload, "Chat", ready_config=CONFIG)
+        self.assertEqual(invalid.data["meeting_ready_reason"], "invalid_source_key")
+        self.assertEqual(invalid.data["meeting_ready_status"], "review")
+
+    def test_old_analysis_image_is_reconciled_after_new_checker(self):
+        # Simulate a new checker, followed by an old image using the unconfigured
+        # save path, then the independent worker picking up its saved brief.
+        self.ref.data = {}
+        archives = ArchiveState.__new__(ArchiveState)
+        archives.client, archives.collection = self.client, self.collection
+        meeting = SimpleNamespace(source_key=KEY, folder_id="folder", notes_id="doc",
+                                  folder_name="Meeting", started_at=CUTOFF + timedelta(minutes=2),
+                                  verified_started_at=CUTOFF + timedelta(minutes=2))
+        with patch("archive_state.firestore.transactional", lambda function: function), \
+             patch("archive_state._utc_now", return_value=CUTOFF + timedelta(minutes=3)):
+            self.assertTrue(archives.reserve_for_dispatch(meeting, "root"))
+        self.ref.data.update({"status": "done", "output_doc_id": "transcript_123",
+                              "analysis_status": "posted", "analysis_chat_message_name": "existing-message"})
+        self.analysis.save_brief(KEY, "brief_123", self.payload, "old chat")
+        self.assertEqual(self.ref.data["meeting_ready_status"], "awaiting_brief")
+        with patch("meeting_ready_worker._now", return_value=CUTOFF + timedelta(hours=1)):
+            self.assertEqual(run_once(self.outbox, CONFIG, deliver_event=lambda *_: 204), 1)
+        self.assertEqual(self.ref.data["meeting_ready_status"], "delivered")
+        self.assertEqual(self.ref.data["analysis_status"], "posted")
+        self.assertEqual(self.ref.data["analysis_chat_message_name"], "existing-message")
+
+    def test_waiting_old_image_with_missing_date_is_flagged_for_review(self):
+        self.ref.data.update({"meeting_ready_status": "awaiting_brief", "analysis_status": "posted",
+                              "meeting_ready_verified_start_at": None,
+                              "analysis_brief_doc_id": "brief_123", "analysis_payload": self.payload})
+        with patch("meeting_ready_worker._now", return_value=CUTOFF + timedelta(hours=1)):
+            self.assertEqual(run_once(self.outbox, CONFIG, deliver_event=lambda *_: 200), 0)
+        self.assertEqual((self.ref.data["meeting_ready_status"], self.ref.data["meeting_ready_reason"]),
+                         ("review", "missing_verified_start"))
+        self.assertEqual(self.ref.data["analysis_status"], "posted")
+
+    def test_awaiting_brief_is_skipped_without_starving_ready_candidates(self):
+        self.ref.data.update({"meeting_ready_status": "awaiting_brief", "analysis_status": "processing"})
+        other = self.collection.document("b" * 64)
+        other.data.update({**archive(), "meeting_ready_status": "awaiting_brief",
+                           "analysis_brief_doc_id": "brief_123", "analysis_payload": self.payload})
+        with patch("meeting_ready_worker._now", return_value=CUTOFF + timedelta(hours=1)):
+            self.assertEqual(run_once(self.outbox, CONFIG, batch_size=1, deliver_event=lambda *_: 200), 1)
+        self.assertEqual(self.ref.data["meeting_ready_status"], "awaiting_brief")
+        self.assertEqual(other.data["meeting_ready_status"], "delivered")
 
     def test_claim_leases_and_fences_late_workers(self):
         self.save()

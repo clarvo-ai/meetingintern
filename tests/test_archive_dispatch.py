@@ -90,6 +90,7 @@ class DispatchTests(unittest.TestCase):
             self.assertTrue(state.reserve_for_dispatch(meeting, "root"))
             ref = state.collection.document("new")
             self.assertEqual(ref.data["archive_first_seen_at"], first)
+            self.assertEqual(ref.data["meeting_ready_status"], "awaiting_brief")
             clock.return_value = first.replace(hour=13)
             state.mark_retry("new", "temporary", "dispatching")
             clock.return_value = first.replace(hour=14)
