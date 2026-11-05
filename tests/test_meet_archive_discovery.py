@@ -54,6 +54,13 @@ class MeetDiscoveryTests(unittest.TestCase):
                          ("notes-folder", "other-folder"))
         self.assertEqual(meeting.source_owner_email, "robert@clarvo.ai")
         self.assertEqual(meeting.source_conference_record, "conferenceRecords/one")
+        self.assertIsNone(meeting.verified_started_at)
+
+    def test_conference_record_start_is_preserved_as_verified_time(self):
+        self.record["startTime"] = stamp(timedelta(hours=4))
+        meeting = meeting_from_record(self.record, self.meet,
+                                      lambda _owner: self.drive, OWNERS, now=NOW)
+        self.assertEqual(meeting.verified_started_at, NOW - timedelta(hours=4))
 
     def test_waits_three_hours_only_when_api_has_no_recording(self):
         self.meet.conferenceRecords.return_value.recordings.return_value.list.return_value.execute.return_value = {}
