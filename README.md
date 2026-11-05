@@ -185,21 +185,63 @@ analysis job and the independently scheduled delivery job:
 * `MEETING_READY_CUTOVER=<timezone-aware RFC3339 timestamp>`
 * `MEETING_READY_SERVICE_ACCOUNT_EMAIL=<analysis job service account email>`
 
-Use the same explicit cutover for both jobs and run the delivery job as the
-analysis service account. The worker obtains a Google-signed ID token for that
-account with the exact webhook URL as audience. Any missing or invalid
-configuration disables delivery. Run `python meeting_ready_worker.py` from the
-analysis image as a separate periodically scheduled Cloud Run Job. The new
-checker image must also be deployed so newly discovered archive records receive
-the timestamps used by the cutover guard. These resources are not configured or
-scheduled by this repository automatically.
+Run the delivery job as `drive-automation@drive-atuomation-project.iam.gserviceaccount.com`
+(the analysis job's existing service account). The worker obtains a Google-signed
+ID token for that account with the exact webhook URL as audience. Any missing or
+invalid configuration disables delivery. Run `python meeting_ready_worker.py`
+from the analysis image as a separate periodically scheduled Cloud Run Job.
 
-Only meetings first discovered at or after the cutover, with a verified meeting
-start at or after it, are eligible. Verification uses the Meet conference start,
-a timestamp in the source filename, or an unambiguously matched Calendar event;
-artifact upload time alone is not enough. Existing records, older meetings, and
-meetings without a verifiable start are omitted rather than backfilled. A later
-cutover also suppresses previously queued events that no longer qualify.
+For a safe initial rollout, choose **one future UTC cutover** and keep its exact
+value unchanged in both configured jobs. Before that instant:
+
+1. Pause the checker scheduler, then drain all old checker executions. Deploy the
+   new checker image; do not remove its discovery marker. New records have an
+   immutable first-seen time and `meeting_ready_status=awaiting_brief` even when
+   the integration is disabled.
+2. Deploy the new analysis image with all three variables above. Configure the
+   separate worker job with the same values and service account; schedule it.
+   Drain old analysis executions and verify the deployed configurations before
+   cutover. Resume the checker scheduler before the chosen cutover.
+
+The worker also reconciles `awaiting_brief` records once a completed archive
+has a saved brief. This recovers a post-cutover meeting whose marker was written
+by the new checker but whose brief was saved by an old or unconfigured analysis
+image, independently of Chat's status. Both jobs must use the same cutover;
+changing it later can suppress queued events. These jobs and schedules are not
+created by this repository.
+
+Only meetings first discovered at or after cutover, with a verified meeting
+start at or after cutover, are eligible. Verification uses the Meet conference
+start, a timestamp in the source filename, or an unambiguously matched Calendar
+event; artifact upload time alone is not enough. Definitely pre-cutover records
+are marked `excluded`, never delivered. Records without first-seen provenance
+cannot be assumed new. In particular, meetings discovered by an old checker
+before it was drained have no marker and cannot be automatically recovered;
+the future cutover and drain above prevent that rollout gap. No historical
+backfill is performed. A missing or invalid brief or transcript still needs the
+existing archive/analysis pipeline to complete before an event can be created.
+
+Completed candidates with uncertain evidence or invalid IDs are persisted as
+`meeting_ready_status=review`, with a non-sensitive `meeting_ready_reason` such
+as `missing_verified_start`, `missing_first_seen`, `invalid_source_key`,
+`invalid_transcript_file_id`, `invalid_brief_file_id`, or `identical_file_ids`.
+Query Firestore's `meeting_audio_archive` collection for `meeting_ready_status`
+equal to `review`; the document ID is the meeting source key. After verifying
+the source independently, run the worker in the same configured environment:
+
+```bash
+python meeting_ready_worker.py --reconcile SOURCE_KEY --verified-start 2026-11-05T12:30:00Z --transcript-file-id DRIVE_ID --brief-file-id DRIVE_ID
+```
+
+Provide only corrections that are needed and independently verified. The
+verified start requires a timezone; it cannot override known pre-cutover
+evidence. The file ID corrections affect only the outbox event, not the Chat
+message or the original archive pointers. A successful reconciliation sets the
+event pending for the next worker run; otherwise the record stays in review or
+is excluded. An absent first-seen time is not automatically repairable: it
+requires separate investigation of discovery provenance. A malformed already
+queued event is marked `invalid_queued_event` for investigation and cannot be
+rewritten by this command, because it may already have been transmitted.
 
 The worker leases events, retries failures with backoff, and marks delivery only
 for a 2xx response. It reuses the exact saved payload on every attempt. An HTTP

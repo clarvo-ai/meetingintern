@@ -75,6 +75,8 @@ class ArchiveState:
             if not snapshot.exists:
                 fields["archive_first_seen_at"] = now
                 fields["meeting_ready_verified_start_at"] = _verified_meeting_start(meeting)
+                # The independent worker can reconcile even an old analysis image.
+                fields["meeting_ready_status"] = "awaiting_brief"
             transaction.set(ref, fields, merge=True)
             return True
 

@@ -1,6 +1,7 @@
 """Independent, scheduled delivery of durable meeting-ready events."""
 
 import base64
+import argparse
 import functools
 import json
 import logging
@@ -15,7 +16,8 @@ from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.oauth2 import id_token
 
-from meeting_ready import eligible_archive, load_config, validate_event
+from meeting_ready import (_aware, eligible_archive, load_config, outbox_changes,
+                           valid_file_id, validate_event)
 
 
 LOGGER = logging.getLogger(__name__)
@@ -38,6 +40,60 @@ class MeetingReadyOutbox:
         snapshots = self.collection.where(filter=FieldFilter(
             "meeting_ready_status", "in", ["pending", "sending"])).stream()
         return [snapshot.id for snapshot in snapshots]
+
+    def awaiting_brief(self):
+        snapshots = self.collection.where(filter=FieldFilter(
+            "meeting_ready_status", "==", "awaiting_brief")).stream()
+        return [snapshot.id for snapshot in snapshots]
+
+    def reconcile(self, key, config, *, manual=False, verified_start=None,
+                  transcript_file_id=None, brief_file_id=None):
+        """Queue a saved brief or record review; never alter Chat or an existing event."""
+        ref = self.collection.document(key)
+        if verified_start is not None and not _aware(verified_start):
+            raise ValueError("Verified start must include a timezone")
+        for value in (transcript_file_id, brief_file_id):
+            if value is not None and not valid_file_id(value):
+                raise ValueError("Invalid correction file ID")
+
+        @firestore.transactional
+        def reconcile_transaction(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                return None
+            current = snapshot.to_dict()
+            allowed = ("review",) if manual else ("awaiting_brief",)
+            if (current.get("meeting_ready_status") not in allowed or
+                    "meeting_ready_event" in current or current.get("status") != "done" or
+                    "analysis_brief_doc_id" not in current):
+                return None
+            candidate = dict(current)
+            if verified_start is not None:
+                prior = candidate.get("meeting_ready_verified_start_at")
+                candidate["meeting_ready_verified_start_at"] = (
+                    min(prior, verified_start) if _aware(prior) else verified_start)
+            selected_transcript = (transcript_file_id if transcript_file_id is not None else
+                                   current.get("meeting_ready_override_transcript_file_id"))
+            if selected_transcript is not None:
+                candidate["output_doc_id"] = selected_transcript
+            selected_brief = (brief_file_id if brief_file_id is not None else
+                              current.get("meeting_ready_override_brief_file_id",
+                                          current["analysis_brief_doc_id"]))
+            changes = outbox_changes(key, candidate, selected_brief,
+                                     current.get("analysis_payload") or {}, config, _now())
+            if not changes:
+                return None
+            if manual and changes["meeting_ready_status"] in ("review", "pending"):
+                if verified_start is not None:
+                    changes["meeting_ready_verified_start_at"] = candidate["meeting_ready_verified_start_at"]
+                if transcript_file_id is not None:
+                    changes["meeting_ready_override_transcript_file_id"] = transcript_file_id
+                if brief_file_id is not None:
+                    changes["meeting_ready_override_brief_file_id"] = brief_file_id
+            transaction.update(ref, changes)
+            return changes["meeting_ready_status"]
+
+        return reconcile_transaction(self.client.transaction())
 
     def claim(self, key, config):
         """Fence concurrent workers and reclaim a sender whose lease expired."""
@@ -63,11 +119,21 @@ class MeetingReadyOutbox:
                 validate_event(event)
                 permitted = event["event_id"] == key and eligible_archive(data, config)
             except ValueError:
-                permitted = False
-            if not permitted:
-                # A changed cutover or corrupt state must not send a stale event.
-                transaction.update(ref, {"meeting_ready_status": "suppressed",
+                transaction.update(ref, {"meeting_ready_status": "review",
+                                         "meeting_ready_reason": "invalid_queued_event",
                                          "meeting_ready_updated_at": now})
+                return None
+            if not permitted:
+                # Preserve unknown eligibility for review, but never send old data.
+                candidate = dict(data)
+                candidate.pop("meeting_ready_event", None)
+                assessment = outbox_changes(key, candidate, event["brief_file_id"],
+                                            data.get("analysis_payload") or {}, config, now)
+                excluded = assessment.get("meeting_ready_status") == "excluded"
+                transaction.update(ref, {
+                    "meeting_ready_status": "suppressed" if excluded else "review",
+                    "meeting_ready_reason": "pre_cutover" if excluded else "ineligible_queued_event",
+                    "meeting_ready_updated_at": now})
                 return None
             attempts = int(data.get("meeting_ready_attempts", 0)) + 1
             transaction.update(ref, {"meeting_ready_status": "sending",
@@ -135,6 +201,12 @@ def run_once(outbox, config, batch_size=MAX_BATCH, deliver_event=deliver):
     """Retry pending events without touching analysis, Drive, or Chat state."""
     if config is None:
         return 0
+    reconciled = 0
+    for key in outbox.awaiting_brief():
+        if reconciled >= batch_size:
+            break
+        if outbox.reconcile(key, config):
+            reconciled += 1
     attempted = 0
     for key in outbox.candidates():
         if attempted >= batch_size:
@@ -158,6 +230,14 @@ def run_once(outbox, config, batch_size=MAX_BATCH, deliver_event=deliver):
 
 def main():
     logging.basicConfig(level=logging.INFO)
+    parser = argparse.ArgumentParser(description="Deliver or reconcile meeting-ready events")
+    parser.add_argument("--reconcile", metavar="SOURCE_KEY")
+    parser.add_argument("--verified-start", help="Verified meeting start, RFC3339 with timezone")
+    parser.add_argument("--transcript-file-id")
+    parser.add_argument("--brief-file-id")
+    args = parser.parse_args()
+    if not args.reconcile and any((args.verified_start, args.transcript_file_id, args.brief_file_id)):
+        parser.error("Correction options require --reconcile")
     try:
         config = load_config(os.environ)
     except ValueError:
@@ -166,7 +246,19 @@ def main():
     if config is None:
         return
     _, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
-    count = run_once(MeetingReadyOutbox(os.getenv("GOOGLE_CLOUD_PROJECT") or project), config)
+    outbox = MeetingReadyOutbox(os.getenv("GOOGLE_CLOUD_PROJECT") or project)
+    if args.reconcile:
+        try:
+            start = (datetime.fromisoformat(args.verified_start.replace("Z", "+00:00"))
+                     if args.verified_start else None)
+            status = outbox.reconcile(args.reconcile, config, manual=True, verified_start=start,
+                                      transcript_file_id=args.transcript_file_id,
+                                      brief_file_id=args.brief_file_id)
+        except ValueError:
+            parser.error("Invalid reconciliation input")
+        LOGGER.info("Meeting-ready reconciliation status: %s", status or "not eligible for review")
+        return
+    count = run_once(outbox, config)
     LOGGER.info("Meeting-ready worker attempted %d event(s)", count)
 
 

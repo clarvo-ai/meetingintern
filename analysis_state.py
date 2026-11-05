@@ -6,7 +6,7 @@ from datetime import datetime, timedelta, timezone
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
-from meeting_ready import archive_with_calendar_start, make_event
+from meeting_ready import outbox_changes
 
 
 DISPATCH_LEASE = timedelta(minutes=10)
@@ -135,20 +135,8 @@ class AnalysisState:
                 raise RuntimeError("Analysis state disappeared before saving the brief")
             current = snapshot.to_dict()
             changes = dict(fields)
-            if "meeting_ready_event" not in current:
-                verified = archive_with_calendar_start(current, payload)
-                try:
-                    event = make_event(source_key, verified, brief_doc_id, ready_config)
-                except ValueError:
-                    # A bad outbox candidate must not prevent the existing Chat flow.
-                    LOGGER.error("Meeting-ready event rejected; Chat will continue")
-                    event = None
-                if event:
-                    changes.update({"meeting_ready_event": event,
-                                    "meeting_ready_status": "pending",
-                                    "meeting_ready_attempts": 0,
-                                    "meeting_ready_verified_start_at": verified["meeting_ready_verified_start_at"],
-                                    "meeting_ready_created_at": _now()})
+            changes.update(outbox_changes(source_key, current, brief_doc_id, payload,
+                                          ready_config, _now()))
             transaction.update(ref, changes)
 
         save(self.client.transaction())

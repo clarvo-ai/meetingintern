@@ -13,6 +13,12 @@ EVENT_FIELDS = {"schema_version", "event_id", "source", "meeting_id",
                 "transcript_file_id", "brief_file_id"}
 
 
+class EventValidationError(ValueError):
+    def __init__(self, code):
+        self.code = code
+        super().__init__(code)
+
+
 @dataclass(frozen=True)
 class MeetingReadyConfig:
     url: str
@@ -44,8 +50,14 @@ def _aware(value):
     return isinstance(value, datetime) and value.tzinfo is not None and value.utcoffset() is not None
 
 
+def valid_file_id(value):
+    return isinstance(value, str) and bool(_FILE_ID.fullmatch(value))
+
+
 def archive_with_calendar_start(archive, payload):
     """Use an unambiguously matched Calendar event as additional time evidence."""
+    if not isinstance(payload, dict):
+        return archive
     evidence = payload.get("meeting_evidence") or {}
     if not isinstance(evidence, dict) or evidence.get("calendar_match") != "matched":
         return archive
@@ -70,9 +82,37 @@ def eligible_archive(archive, config):
     first_seen = archive.get("archive_first_seen_at")
     started = archive.get("meeting_started_at")
     verified = archive.get("meeting_ready_verified_start_at")
-    return (archive.get("status") == "done" and _aware(first_seen) and _aware(started)
+    return (archive.get("status") == "done" and _aware(first_seen)
             and _aware(verified) and first_seen >= config.cutover
-            and started >= config.cutover and verified >= config.cutover)
+            and (not _aware(started) or started >= config.cutover) and verified >= config.cutover)
+
+
+def outbox_changes(source_key, archive, brief_file_id, payload, config, now):
+    """Classify a completed candidate without silently dropping uncertain data."""
+    if config is None or "meeting_ready_event" in archive or archive.get("status") != "done":
+        return {}
+    verified = archive_with_calendar_start(archive, payload)
+    first_seen = verified.get("archive_first_seen_at")
+    started = verified.get("meeting_started_at")
+    trusted = verified.get("meeting_ready_verified_start_at")
+    if any(_aware(value) and value < config.cutover for value in (first_seen, started, trusted)):
+        status, reason = "excluded", "pre_cutover"
+    elif not _aware(first_seen):
+        status, reason = "review", "missing_first_seen"
+    elif not _aware(trusted):
+        status, reason = "review", "missing_verified_start"
+    else:
+        try:
+            event = make_event(source_key, verified, brief_file_id, config)
+        except EventValidationError as error:
+            status, reason = "review", error.code
+        else:
+            return {"meeting_ready_event": event, "meeting_ready_status": "pending",
+                    "meeting_ready_reason": None, "meeting_ready_attempts": 0,
+                    "meeting_ready_verified_start_at": trusted, "meeting_ready_created_at": now,
+                    "meeting_ready_updated_at": now}
+    return {"meeting_ready_status": status, "meeting_ready_reason": reason,
+            "meeting_ready_updated_at": now}
 
 
 def make_event(source_key, archive, brief_file_id, config):
@@ -90,11 +130,13 @@ def validate_event(event):
     if (not isinstance(event, dict) or set(event) != EVENT_FIELDS or
             type(event.get("schema_version")) is not int or event["schema_version"] != 1 or
             event.get("source") != "meetingintern"):
-        raise ValueError("Invalid meeting-ready event shape")
+        raise EventValidationError("invalid_event_shape")
     key = event.get("event_id")
     if not isinstance(key, str) or not _SOURCE_KEY.fullmatch(key) or event.get("meeting_id") != key:
-        raise ValueError("Invalid meeting-ready event identity")
+        raise EventValidationError("invalid_source_key")
     for field in ("transcript_file_id", "brief_file_id"):
         value = event.get(field)
-        if not isinstance(value, str) or not _FILE_ID.fullmatch(value):
-            raise ValueError("Invalid meeting-ready file ID")
+        if not valid_file_id(value):
+            raise EventValidationError("invalid_" + field)
+    if event["transcript_file_id"] == event["brief_file_id"]:
+        raise EventValidationError("identical_file_ids")
