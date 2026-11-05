@@ -128,6 +128,7 @@ def meeting_from_record(record, meet, drive_factory, owners, preferred=(), now=N
         source_conference_record=name,
         meet_reader_email=preferred[0] if preferred else (notes or recording)["source_owner_email"],
         started_at=_timestamp(record.get("startTime") or (notes or recording)["createdTime"]),
+        verified_started_at=_timestamp(record["startTime"]) if record.get("startTime") else None,
     )
     if not recording and not export_transcript(drive_factory(meeting.source_owner_email), meeting):
         return None

@@ -163,6 +163,48 @@ held for manual reconciliation rather than retried into a possible duplicate.
 Customer demo search links and the representative's own feedback are outside
 this increment.
 
+### Customer-context meeting-ready outbox
+
+The integration is disabled by default. When enabled, saving the companion brief
+and creating an immutable Firestore outbox event happen in the same transaction.
+Delivery runs separately from analysis and Chat. The event contains only:
+
+```json
+{"schema_version":1,"event_id":"<source key>","source":"meetingintern","meeting_id":"<source key>","transcript_file_id":"<Drive file ID>","brief_file_id":"<Drive file ID>"}
+```
+
+Both keys are the existing 64-character lowercase SHA-256 source key. No
+transcript or other meeting details are sent. Set all three variables on the
+analysis job and the independently scheduled delivery job:
+
+* `MEETING_READY_WEBHOOK_URL=https://ci.clarvo.ai/webhooks/meeting-ready`
+* `MEETING_READY_CUTOVER=<timezone-aware RFC3339 timestamp>`
+* `MEETING_READY_SERVICE_ACCOUNT_EMAIL=<analysis job service account email>`
+
+Use the same explicit cutover for both jobs and run the delivery job as the
+analysis service account. The worker obtains a Google-signed ID token for that
+account with the exact webhook URL as audience. Any missing or invalid
+configuration disables delivery. Run `python meeting_ready_worker.py` from the
+analysis image as a separate periodically scheduled Cloud Run Job. The new
+checker image must also be deployed so newly discovered archive records receive
+the timestamps used by the cutover guard. These resources are not configured or
+scheduled by this repository automatically.
+
+Only meetings first discovered at or after the cutover, with a verified meeting
+start at or after it, are eligible. Verification uses the Meet conference start,
+a timestamp in the source filename, or an unambiguously matched Calendar event;
+artifact upload time alone is not enough. Existing records, older meetings, and
+meetings without a verifiable start are omitted rather than backfilled. A later
+cutover also suppresses previously queued events that no longer qualify.
+
+The worker leases events, retries failures with backoff, and marks delivery only
+for a 2xx response. It reuses the exact saved payload on every attempt. An HTTP
+response or Firestore acknowledgement can be lost after the receiver commits,
+so physical requests are at least once: the receiver must atomically deduplicate
+by `event_id` to achieve one logical event. The receiver must verify the token's
+signature, audience and service account identity. Chat can succeed or fail
+independently of this delivery.
+
 The analysis job reads speaker labels and any explicit `Attendees` section from
 the original Meet Doc. It never treats names or emails mentioned in Gemini
 notes as proof of attendance. The current team roster is supplied as
