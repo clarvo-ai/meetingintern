@@ -163,5 +163,7 @@ class ArchiveState:
                     "last_error": str(reason)[:300],
                     "updated_at": now,
                 })
+                return True
+            return False
 
-        release(self.client.transaction())
+        return release(self.client.transaction())

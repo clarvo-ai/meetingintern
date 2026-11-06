@@ -6,6 +6,7 @@ import os
 import google.auth
 from googleapiclient.discovery import build
 
+from intelligence_log_client import client as intelligence_log
 from archive_state import ArchiveState
 from audio_archive import (AudioGemini, drive_credentials, existing_archive_doc_id,
                            find_meetings, find_meetings_across_roots,
@@ -19,6 +20,14 @@ from transcript_cleanup import CLEANUP_VERSION, parse_spelling_hints
 
 
 LOGGER = logging.getLogger(__name__)
+
+
+def log_event(code, key):
+    """Keep optional logging failures outside the archive workflow."""
+    try:
+        intelligence_log.emit(code, key=key)
+    except Exception:
+        pass
 
 
 def cleanup_hints(meeting, source_drive, recording_drive, calendar, owners,
@@ -110,6 +119,7 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials,
                 state.mark_retry(source_key, "Existing transcript requires cleanup backfill", "processing")
                 return None
             state.mark_done(source_key, existing)
+            log_event("meeting_archived", source_key)
             return existing
         source_drive = (owner_drive(meeting.source_owner_email)
                         if meeting.source_conference_record else drive)
@@ -131,9 +141,11 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials,
             output = process_meeting(drive, docs, credentials, gemini, destination_folder_id,
                                      meeting, cleanup_context=cleanup_context)
         state.mark_done(source_key, output)
+        log_event("meeting_archived", source_key)
         return output
     except Exception as error:
-        state.mark_retry(source_key, error, "processing")
+        if state.mark_retry(source_key, error, "processing"):
+            log_event("meeting_archive_failed", source_key)
         raise
 
 
@@ -154,9 +166,15 @@ def main():
     roster = parse_team_roster(os.getenv("MEETING_TEAM_ROSTER_JSON"))
     references = parse_company_references(os.getenv("MEETING_COMPANY_REFERENCE_JSON"))
     spelling_hints = parse_spelling_hints(os.getenv("MEETING_TRANSCRIPT_TERMS_JSON"))
-    output = work_once(source_key, destination, api_key, state, drive_credentials(),
-                       service_account_email, owners, calendar_client(owners), roster, references,
-                       spelling_hints)
+    try:
+        output = work_once(source_key, destination, api_key, state, drive_credentials(),
+                           service_account_email, owners, calendar_client(owners), roster, references,
+                           spelling_hints)
+    finally:
+        try:
+            intelligence_log.flush(1)
+        except Exception:
+            pass
     LOGGER.info("Finished archive work for %s; output Doc: %s", source_key, output)
 
 
