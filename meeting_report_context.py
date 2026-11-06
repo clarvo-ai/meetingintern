@@ -18,6 +18,29 @@ def _email_name(email):
     return " ".join(part.capitalize() for part in parts) if len(parts) >= 2 else None
 
 
+def _corroborated_name_match(evidence, display, invitee, invitees):
+    """Recognize strong name matches without treating them as signed-in identities."""
+    words = _words(display)
+    candidate = invitee.get("name") or _email_name(invitee["email"])
+    candidate_words = _words(candidate)
+    if (len(words) != 1 or len(candidate_words) < 2 or candidate_words[0] != words[0]
+            or invitee.get("response_status") != "accepted"
+            or evidence.get("calendar_match") != "matched"
+            or evidence.get("calendar_match_basis") != "attachment"
+            or evidence.get("meet_participant_record_status") != "matched"
+            or evidence.get("meet_record_match_basis") != "recording_id"):
+        return False
+    matching_invitees = [person for person in invitees
+                         if (_words(person.get("name") or _email_name(person["email"])
+                                    or person["email"].split("@", 1)[0]) or [None])[0] == words[0]]
+    matching_joiners = [person for person in evidence.get("confirmed_meet_participants", [])
+                        if (_words(person.get("display_name")) or [None])[0] == words[0]]
+    matching_speakers = [speaker for speaker, turns in (evidence.get("speaker_turns") or {}).items()
+                         if turns and (_words(speaker) or [None])[0] == words[0]]
+    return (len(matching_invitees) == len(matching_joiners) == len(matching_speakers) == 1
+            and _words(matching_speakers[0]) == words)
+
+
 def combined_people(evidence, roster):
     """Match joiners to invitees only with a unique full or first-name match."""
     event = evidence.get("calendar_event") if evidence.get("calendar_match") == "matched" else None
@@ -43,6 +66,7 @@ def combined_people(evidence, roster):
                 partial.append(index)
         choices = exact if len(exact) == 1 else partial if len(partial) == 1 and not exact else []
         matched = choices[0] if len(choices) == 1 else None
+        corroborated = False
         if matched is not None:
             available.remove(matched)
             invitee = invitees[matched]
@@ -50,12 +74,14 @@ def combined_people(evidence, roster):
             candidate = invitee.get("name") or _email_name(email)
             likely = joiner.get("identity_kind") != "signed_in" or len(words) == 1
             name = candidate if likely and candidate else display
+            corroborated = likely and _corroborated_name_match(evidence, display, invitee, invitees)
         else:
             email = roster_email
             likely = False
             name = display
         people.append({"name": name, "email": email, "joined": True,
                        "joined_as": display, "likely_identity": likely,
+                       "corroborated_name_match": corroborated,
                        "identity_kind": joiner.get("identity_kind")})
     for index in sorted(available):
         invitee = invitees[index]
@@ -75,7 +101,8 @@ def people_line(evidence, roster):
         if person.get("email") and name != person["email"]:
             name += f" <{person['email']}>"
         if person["joined"] and person["likely_identity"]:
-            name += f" (joined as {person['joined_as']}; invitee match unverified)"
+            qualifier = "matched by name" if person["corroborated_name_match"] else "invitee match unverified"
+            name += f" (joined as {person['joined_as']}; {qualifier})"
         elif person["joined"]:
             name += " (joined)"
         else:
