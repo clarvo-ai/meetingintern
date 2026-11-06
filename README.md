@@ -152,7 +152,11 @@ delivery status for later reporting and safe retries.
 
 The Chat header combines confirmed Meet joiners with matched Calendar invitees
 by unambiguous name or email matches. Anonymous first-name matches to an
-invitee email are marked as likely and unverified; invitation response status
+invitee email are marked as likely and unverified. When a unique first-name
+match has an accepted invitation, a matching transcript speaker, and both the
+Calendar event and Meet participant record are linked through source artifacts,
+the header says "matched by name" instead. This does not change the recorded
+identity evidence or treat the person as signed in; invitation response status
 never establishes attendance. The header keeps the meeting type when supported,
 topic tags, Finland-local meeting time, relevant company context, and a matched
 Calendar event link. The full transcript is the first URL for the Chat preview,
@@ -180,11 +184,12 @@ analysis job and the independently scheduled delivery job:
 * `MEETING_READY_WEBHOOK_URL=https://ci.clarvo.ai/webhooks/meeting-ready`
 * `MEETING_READY_CUTOVER=<timezone-aware RFC3339 timestamp>`
 * `MEETING_READY_SERVICE_ACCOUNT_EMAIL=<analysis job service account email>`
+* `MEETING_TODO_WEBHOOK_URL=https://ci.clarvo.ai/todos/api/v1/meeting-events` (optional; enables the to-do receiver)
 
 Run the delivery job as `drive-automation@drive-atuomation-project.iam.gserviceaccount.com`
 (the analysis job's existing service account). The worker obtains a Google-signed
 ID token for that account with the exact webhook URL as audience. Any missing or
-invalid configuration disables delivery. Run `python meeting_ready_worker.py`
+invalid configuration disables delivery. When the to-do URL is set, the worker sends the same immutable event to both receivers with separately audience-bound ID tokens. It acknowledges the outbox only after both return 2xx; partial failures retry both, so both receivers must deduplicate by event and document identity. Run `python meeting_ready_worker.py`
 from the analysis image as a separate periodically scheduled Cloud Run Job.
 
 For a safe initial rollout, choose **one future UTC cutover** and keep its exact

@@ -8,6 +8,7 @@ import logging
 import os
 import uuid
 from datetime import datetime, timedelta, timezone
+from dataclasses import replace
 
 import google.auth
 import requests
@@ -188,13 +189,28 @@ def _id_token(config):
 
 
 def deliver(event, config, token_factory=_id_token, post=requests.post):
-    """Send only the immutable event, and acknowledge strictly on a 2xx reply."""
+    """Deliver the same immutable event to both idempotent receivers before acknowledging."""
     validate_event(event)
-    token = token_factory(config)
     body = json.dumps(event, sort_keys=True, separators=(",", ":"), ensure_ascii=True).encode("utf-8")
-    response = post(config.url, data=body, headers={"Authorization": "Bearer " + token,
-                    "Content-Type": "application/json"}, timeout=(5, 25), allow_redirects=False)
-    return response.status_code
+    statuses = []
+    first_error = None
+    for url in (config.url, config.todo_url):
+        if not url:
+            continue
+        target = replace(config, url=url)
+        try:
+            token = token_factory(target)
+            response = post(url, data=body, headers={"Authorization": "Bearer " + token,
+                            "Content-Type": "application/json"}, timeout=(5, 25), allow_redirects=False)
+            statuses.append(response.status_code)
+        except Exception as error:
+            # Still attempt the other receiver, and do not log credentials or payloads.
+            LOGGER.warning("Meeting-ready receiver unavailable")
+            first_error = first_error or error
+            statuses.append(503)
+    if first_error:
+        raise first_error
+    return next((status for status in statuses if not 200 <= status < 300), statuses[-1])
 
 
 def run_once(outbox, config, batch_size=MAX_BATCH, deliver_event=deliver):

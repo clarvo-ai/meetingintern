@@ -6,6 +6,7 @@ from datetime import datetime, timezone
 
 
 WEBHOOK_URL = "https://ci.clarvo.ai/webhooks/meeting-ready"
+TODO_WEBHOOK_URL = "https://ci.clarvo.ai/todos/api/v1/meeting-events"
 _SOURCE_KEY = re.compile(r"[0-9a-f]{64}\Z")
 _FILE_ID = re.compile(r"[A-Za-z0-9_-]{1,256}\Z")
 _SERVICE_ACCOUNT = re.compile(r"[a-z0-9][a-z0-9._-]*@[a-z0-9][a-z0-9.-]*\.iam\.gserviceaccount\.com\Z")
@@ -24,6 +25,7 @@ class MeetingReadyConfig:
     url: str
     cutover: datetime
     service_account_email: str
+    todo_url: str = ""
 
 
 def load_config(env):
@@ -31,11 +33,12 @@ def load_config(env):
     url = env.get("MEETING_READY_WEBHOOK_URL", "").strip()
     raw_cutover = env.get("MEETING_READY_CUTOVER", "").strip()
     account = env.get("MEETING_READY_SERVICE_ACCOUNT_EMAIL", "").strip()
-    if not any((url, raw_cutover, account)):
+    todo_url = env.get("MEETING_TODO_WEBHOOK_URL", "").strip()
+    if not any((url, raw_cutover, account, todo_url)):
         return None
     if not all((url, raw_cutover, account)):
         raise ValueError("Meeting-ready configuration is incomplete")
-    if url != WEBHOOK_URL or not _SERVICE_ACCOUNT.fullmatch(account):
+    if url != WEBHOOK_URL or not _SERVICE_ACCOUNT.fullmatch(account) or (todo_url and todo_url != TODO_WEBHOOK_URL):
         raise ValueError("Meeting-ready configuration has an invalid target or service account")
     try:
         cutover = datetime.fromisoformat(raw_cutover.replace("Z", "+00:00"))
@@ -43,7 +46,7 @@ def load_config(env):
         raise ValueError("Meeting-ready cutover must be an RFC3339 timestamp") from error
     if cutover.tzinfo is None or cutover.utcoffset() is None:
         raise ValueError("Meeting-ready cutover must include a timezone")
-    return MeetingReadyConfig(url, cutover.astimezone(timezone.utc), account)
+    return MeetingReadyConfig(url, cutover.astimezone(timezone.utc), account, todo_url)
 
 
 def _aware(value):
