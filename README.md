@@ -152,7 +152,11 @@ delivery status for later reporting and safe retries.
 
 The Chat header combines confirmed Meet joiners with matched Calendar invitees
 by unambiguous name or email matches. Anonymous first-name matches to an
-invitee email are marked as likely and unverified; invitation response status
+invitee email are marked as likely and unverified. When a unique first-name
+match has an accepted invitation, a matching transcript speaker, and both the
+Calendar event and Meet participant record are linked through source artifacts,
+the header says "matched by name" instead. This does not change the recorded
+identity evidence or treat the person as signed in; invitation response status
 never establishes attendance. The header keeps the meeting type when supported,
 topic tags, Finland-local meeting time, relevant company context, and a matched
 Calendar event link. The full transcript is the first URL for the Chat preview,
