@@ -4,6 +4,8 @@ from datetime import datetime, timedelta, timezone
 
 from google.cloud import firestore
 
+from meeting_evidence import _source_time
+
 
 DISPATCH_LEASE = timedelta(minutes=10)
 WORK_LEASE = timedelta(hours=12)
@@ -17,6 +19,19 @@ def _utc_now():
 def _lease_active(data, now):
     lease = data.get("lease_until")
     return lease is not None and lease > now
+
+
+def _verified_meeting_start(meeting):
+    """Do not use artifact creation as proof a historical meeting is new."""
+    timestamps = [getattr(meeting, "verified_started_at", None)]
+    try:
+        named = _source_time(getattr(meeting, "folder_name", ""))
+        if named:
+            timestamps.append(datetime.fromisoformat(named))
+    except ValueError:
+        pass
+    timestamps = [value for value in timestamps if value is not None and value.tzinfo is not None]
+    return min(timestamps) if timestamps else None
 
 
 class ArchiveState:
@@ -39,7 +54,7 @@ class ArchiveState:
                 return False
             if data.get("next_attempt_at") and data["next_attempt_at"] > now:
                 return False
-            transaction.set(ref, {
+            fields = {
                 "status": "dispatching",
                 "lease_until": now + DISPATCH_LEASE,
                 "source_root_id": root_id,
@@ -55,7 +70,14 @@ class ArchiveState:
                 "meet_reader_email": getattr(meeting, "meet_reader_email", None),
                 "meeting_started_at": getattr(meeting, "started_at", None),
                 "updated_at": now,
-            }, merge=True)
+            }
+            # Only newly discovered records are eligible for future integrations.
+            if not snapshot.exists:
+                fields["archive_first_seen_at"] = now
+                fields["meeting_ready_verified_start_at"] = _verified_meeting_start(meeting)
+                # The independent worker can reconcile even an old analysis image.
+                fields["meeting_ready_status"] = "awaiting_brief"
+            transaction.set(ref, fields, merge=True)
             return True
 
         return reserve(self.client.transaction())

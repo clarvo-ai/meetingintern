@@ -17,6 +17,7 @@ from meeting_evidence import (archived_speech_body, calendar_client,
 from meeting_analysis import (create_or_find_brief, format_chat_message, post_chat_message,
                               ChatDeliveryRejected, ChatDeliveryUncertain)
 from meeting_report_v2 import generate_report, format_report_brief, format_report_chat
+from meeting_ready import load_config as load_meeting_ready_config
 from transcript_cleanup import parse_spelling_hints
 
 
@@ -26,7 +27,7 @@ LOGGER = logging.getLogger(__name__)
 def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
               model="gemini-3.5-flash-lite", roster=None, calendar_ids=(), calendar=None,
               meet_factory=None, company_references=None, source_drive_factory=None,
-              file_owner_ids=(), spelling_hints=None):
+              file_owner_ids=(), spelling_hints=None, meeting_ready_config=None):
     """Resume from a saved brief if a previous execution stopped before Chat."""
     data = state.claim_for_work(source_key)
     if not data:
@@ -92,7 +93,11 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
             format_report_chat(payload, transcript_doc_id, brief_doc_id, roster or {})
             if report_v2 else format_chat_message(title, transcript_doc_id, brief_doc_id, payload)
         )
-        state.save_brief(source_key, brief_doc_id, payload, chat_text)
+        if meeting_ready_config is None:
+            state.save_brief(source_key, brief_doc_id, payload, chat_text)
+        else:
+            state.save_brief(source_key, brief_doc_id, payload, chat_text,
+                             ready_config=meeting_ready_config)
         state.mark_sending(source_key)
         try:
             message_name = post_chat_message(webhook_url, space_id, source_key, chat_text)
@@ -142,11 +147,16 @@ def main():
         return source_drives[owner]
     company_references = parse_company_references(os.getenv("MEETING_COMPANY_REFERENCE_JSON"))
     spelling_hints = parse_spelling_hints(os.getenv("MEETING_TRANSCRIPT_TERMS_JSON"))
+    try:
+        meeting_ready_config = load_meeting_ready_config(os.environ)
+    except ValueError:
+        LOGGER.error("Meeting-ready configuration invalid; delivery is disabled")
+        meeting_ready_config = None
     work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
               os.getenv("GEMINI_MODEL", "gemini-3.5-flash-lite"), roster,
               calendar_ids, calendar_client(calendar_ids), meet_factory,
               company_references, source_drive if service_account_email else None,
-              file_owner_ids, spelling_hints)
+              file_owner_ids, spelling_hints, meeting_ready_config)
 
 
 if __name__ == "__main__":

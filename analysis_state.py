@@ -1,15 +1,19 @@
 """Independent Firestore claims for meeting briefs and Chat delivery."""
 
+import logging
 from datetime import datetime, timedelta, timezone
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
+
+from meeting_ready import outbox_changes
 
 
 DISPATCH_LEASE = timedelta(minutes=10)
 WORK_LEASE = timedelta(hours=2)
 RETRY_DELAY = timedelta(minutes=15)
 ACTIVE_STATUSES = ("dispatching", "queued", "processing")
+LOGGER = logging.getLogger(__name__)
 
 
 def _now():
@@ -109,16 +113,33 @@ class AnalysisState:
 
         return claim(self.client.transaction())
 
-    def save_brief(self, source_key, brief_doc_id, payload, chat_text):
-        """Persist exactly what will be posted before trying the webhook."""
-        self.collection.document(source_key).update({
+    def save_brief(self, source_key, brief_doc_id, payload, chat_text, ready_config=None):
+        """Save the brief and, when eligible, its immutable outbox event together."""
+        ref = self.collection.document(source_key)
+        fields = {
             "analysis_brief_doc_id": brief_doc_id,
             "analysis_payload": payload,
             "analysis_meeting_type": payload["meeting_type"],
             "analysis_topic_tags": payload["topic_tags"],
             "analysis_chat_text": chat_text,
             "analysis_updated_at": _now(),
-        })
+        }
+        if ready_config is None:
+            ref.update(fields)
+            return
+
+        @firestore.transactional
+        def save(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if not snapshot.exists:
+                raise RuntimeError("Analysis state disappeared before saving the brief")
+            current = snapshot.to_dict()
+            changes = dict(fields)
+            changes.update(outbox_changes(source_key, current, brief_doc_id, payload,
+                                          ready_config, _now()))
+            transaction.update(ref, changes)
+
+        save(self.client.transaction())
 
     def mark_invalid_source(self, source_key, reason):
         """Permanently suppress a brief when the archived Doc has no speech."""

@@ -66,6 +66,7 @@ class Meeting:
     source_conference_record: str | None = None
     meet_reader_email: str | None = None
     started_at: datetime | None = None
+    verified_started_at: datetime | None = None
 
 
 def drive_credentials(impersonate_service_account=None):

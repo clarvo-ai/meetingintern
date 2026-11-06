@@ -8,7 +8,7 @@ from unittest.mock import Mock, patch
 from archive_checker import check_once, dispatch_analysis_jobs, source_groups
 from archive_job import work_once as archive_work_once
 from analysis_state import AnalysisState
-from archive_state import ArchiveState
+from archive_state import ArchiveState, _verified_meeting_start
 from audio_archive import Meeting
 
 
@@ -79,6 +79,37 @@ class DispatchTests(unittest.TestCase):
             self.assertIsNotNone(state.claim_for_work(meeting.source_key))
             state.mark_retry(meeting.source_key, "late launch response", "dispatching")
             self.assertEqual(state.collection.document(meeting.source_key).data["status"], "processing")
+
+    def test_first_seen_is_recorded_once_for_new_meetings_only(self):
+        state = ArchiveState.__new__(ArchiveState)
+        state.client, state.collection = FakeClient(), FakeCollection()
+        meeting = SimpleNamespace(source_key="new", folder_id="folder", notes_id="doc")
+        first = datetime(2026, 11, 5, 12, tzinfo=timezone.utc)
+        with patch("archive_state.firestore.transactional", lambda function: function), \
+             patch("archive_state._utc_now", return_value=first) as clock:
+            self.assertTrue(state.reserve_for_dispatch(meeting, "root"))
+            ref = state.collection.document("new")
+            self.assertEqual(ref.data["archive_first_seen_at"], first)
+            self.assertEqual(ref.data["meeting_ready_status"], "awaiting_brief")
+            clock.return_value = first.replace(hour=13)
+            state.mark_retry("new", "temporary", "dispatching")
+            clock.return_value = first.replace(hour=14)
+            self.assertTrue(state.reserve_for_dispatch(meeting, "root"))
+            self.assertEqual(ref.data["archive_first_seen_at"], first)
+            old = state.collection.document("old")
+            old.data.update({"status": "pending"})
+            meeting.source_key = "old"
+            self.assertTrue(state.reserve_for_dispatch(meeting, "root"))
+            self.assertNotIn("archive_first_seen_at", old.data)
+
+    def test_cutover_uses_meeting_time_not_later_artifact_creation(self):
+        meeting = SimpleNamespace(folder_name="Demo - 2026/11/04 12:30 EET",
+                                  verified_started_at=None)
+        self.assertEqual(_verified_meeting_start(meeting), datetime(2026, 11, 4, 10, 30, tzinfo=timezone.utc))
+        meeting.folder_name = "Ad hoc meeting without a trustworthy time"
+        self.assertIsNone(_verified_meeting_start(meeting))
+        meeting.verified_started_at = datetime(2026, 11, 5, 12, tzinfo=timezone.utc)
+        self.assertEqual(_verified_meeting_start(meeting), meeting.verified_started_at)
 
     def test_same_doc_seen_in_two_roots_launches_once(self):
         meeting = Meeting(
