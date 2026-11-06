@@ -10,7 +10,7 @@ from unittest.mock import Mock, patch
 from analysis_job import work_once
 from analysis_state import AnalysisState
 from archive_state import ArchiveState
-from meeting_ready import WEBHOOK_URL, load_config, make_event, validate_event
+from meeting_ready import TODO_WEBHOOK_URL, WEBHOOK_URL, load_config, make_event, validate_event
 from meeting_ready_worker import MeetingReadyOutbox, _id_token, deliver, run_once
 
 
@@ -94,7 +94,8 @@ class ContractTests(unittest.TestCase):
                              {"MEETING_READY_WEBHOOK_URL": WEBHOOK_URL + "/"},
                              {"MEETING_READY_SERVICE_ACCOUNT_EMAIL": "not-an-account"},
                              {"MEETING_READY_CUTOVER": "2026-11-05T12:00:00"},
-                             {"MEETING_READY_CUTOVER": "garbage"}):
+                             {"MEETING_READY_CUTOVER": "garbage"},
+                             {"MEETING_TODO_WEBHOOK_URL": "https://other.example/"}):
             with self.subTest(patch_values=patch_values), self.assertRaises(ValueError):
                 load_config({**ENV, **patch_values})
 
@@ -348,6 +349,33 @@ class OutboxTests(unittest.TestCase):
         self.assertFalse(first.kwargs["allow_redirects"])
         self.assertEqual(set(json.loads(first.kwargs["data"])),
                          {"schema_version", "event_id", "source", "meeting_id", "transcript_file_id", "brief_file_id"})
+
+    def test_fanout_retries_until_both_receivers_acknowledge(self):
+        config = load_config({**ENV, "MEETING_TODO_WEBHOOK_URL": TODO_WEBHOOK_URL})
+        self.save()
+        post = Mock(side_effect=[SimpleNamespace(status_code=202), SimpleNamespace(status_code=503),
+                                 SimpleNamespace(status_code=200), SimpleNamespace(status_code=202)])
+        audiences = []
+        def get_token(target):
+            audiences.append(target.url)
+            return 'id-token'
+        sender = lambda event, settings: deliver(event, settings, token_factory=get_token, post=post)
+        with patch("meeting_ready_worker._now", return_value=CUTOFF + timedelta(hours=1)) as clock:
+            self.assertEqual(run_once(self.outbox, config, deliver_event=sender), 1)
+            self.assertEqual(self.ref.data["meeting_ready_status"], "pending")
+            clock.return_value += timedelta(seconds=61)
+            self.assertEqual(run_once(self.outbox, config, deliver_event=sender), 1)
+            self.assertEqual(self.ref.data["meeting_ready_status"], "delivered")
+        self.assertEqual(audiences, [WEBHOOK_URL, TODO_WEBHOOK_URL, WEBHOOK_URL, TODO_WEBHOOK_URL])
+        self.assertEqual(len({call.kwargs['data'] for call in post.call_args_list}), 1)
+
+    def test_unreachable_receiver_does_not_block_other_receiver_attempt(self):
+        config = load_config({**ENV, "MEETING_TODO_WEBHOOK_URL": TODO_WEBHOOK_URL})
+        event = make_event(KEY, archive(), "brief_123", config)
+        post = Mock(side_effect=[RuntimeError('unavailable'), SimpleNamespace(status_code=202)])
+        with self.assertRaises(RuntimeError):
+            deliver(event, config, token_factory=lambda _: 'id-token', post=post)
+        self.assertEqual([call.args[0] for call in post.call_args_list], [WEBHOOK_URL, TODO_WEBHOOK_URL])
 
     def test_lost_ack_retries_the_same_event_after_lease_expiry(self):
         self.save()
