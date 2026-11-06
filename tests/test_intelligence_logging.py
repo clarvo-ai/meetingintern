@@ -14,7 +14,12 @@ class PipelineLoggingTests(unittest.TestCase):
              patch('archive_job.intelligence_log') as logged:
             with self.assertRaises(RuntimeError):
                 work_once('opaque', 'destination', 'key', state, Mock())
-            logged.emit.assert_called_once_with('meeting_archive_failed', key='opaque')
+            logged.emit.assert_called_once()
+            self.assertEqual(logged.emit.call_args.args, ('meeting_archive_failed',))
+            details = logged.emit.call_args.kwargs['details']
+            self.assertEqual(details['exception']['type'], 'RuntimeError')
+            self.assertEqual(details['retry_after_seconds'], 900)
+            self.assertNotIn('private', str(details))
             state.mark_retry.assert_called_once()
             logged.reset_mock()
             state.mark_retry.return_value = False

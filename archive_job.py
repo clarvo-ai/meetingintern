@@ -2,11 +2,12 @@
 
 import logging
 import os
+import traceback
 
 import google.auth
 from googleapiclient.discovery import build
 
-from intelligence_log_client import client as intelligence_log
+from intelligence_log_client import client as intelligence_log, diagnostics
 from archive_state import ArchiveState
 from audio_archive import (AudioGemini, drive_credentials, existing_archive_doc_id,
                            find_meetings, find_meetings_across_roots,
@@ -22,10 +23,15 @@ from transcript_cleanup import CLEANUP_VERSION, parse_spelling_hints
 LOGGER = logging.getLogger(__name__)
 
 
-def log_event(code, key):
+def log_event(code, key, *, error=None):
     """Keep optional logging failures outside the archive workflow."""
     try:
-        intelligence_log.emit(code, key=key)
+        stage = 'transcript_cleanup' if error and any(
+            os.path.basename(frame.filename) == 'transcript_cleanup.py'
+            for frame in traceback.extract_tb(error.__traceback__)) else 'archive'
+        details = diagnostics(stage=stage, source=key, error=error,
+                              retry_after_seconds=900 if error else None)
+        intelligence_log.emit(code, key=key, details=details)
     except Exception:
         pass
 
@@ -145,7 +151,7 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials,
         return output
     except Exception as error:
         if state.mark_retry(source_key, error, "processing"):
-            log_event("meeting_archive_failed", source_key)
+            log_event("meeting_archive_failed", source_key, error=error)
         raise
 
 
