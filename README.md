@@ -622,3 +622,11 @@ If you encounter any issues or have questions, please:
 ## 🔄 Updates
 
 This project will most likely not be updated by me, as it is running on autopilot.
+
+The archive job can send content-free operational events to the Clarvo
+Intelligence logs service. Set `CLARVO_LOGS_URL` to the authenticated HTTPS
+event endpoint and mount a dedicated producer token as a protected file named
+by `CLARVO_LOGS_TOKEN_FILE`. No token or webhook URL belongs in source control.
+The job sends a stable deduplicated event after a completed archive or failed
+processing claim. Delivery is best-effort and receives at most one second at
+job shutdown; an unavailable log service never blocks archive processing.
