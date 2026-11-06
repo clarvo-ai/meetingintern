@@ -170,7 +170,7 @@ class DispatchTests(unittest.TestCase):
              patch("archive_job.process_meeting", return_value="output-doc") as process, \
              patch("archive_job.intelligence_log") as logged:
             result = archive_work_once("old-key", "destination", "key", state, Mock())
-        logged.emit.assert_called_once_with("meeting_archived", key="old-key")
+        logged.emit.assert_called_once_with("meeting_archived", key="old-key", details=unittest.mock.ANY)
         self.assertEqual(result, "output-doc")
         process.assert_called_once()
         state.mark_done.assert_called_once_with("old-key", "output-doc")
