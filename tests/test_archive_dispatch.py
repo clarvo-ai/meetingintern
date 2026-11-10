@@ -1,7 +1,7 @@
 """Verify that frequent checks cannot dispatch or work a meeting twice."""
 
 import unittest
-from datetime import datetime, timezone
+from datetime import datetime, timedelta, timezone
 from types import SimpleNamespace
 from unittest.mock import Mock, patch
 
@@ -9,7 +9,7 @@ from archive_checker import check_once, dispatch_analysis_jobs, source_groups
 from archive_job import work_once as archive_work_once
 from analysis_state import AnalysisState
 from archive_state import ArchiveState, _verified_meeting_start
-from audio_archive import Meeting
+from audio_archive import Meeting, archive_content_digest
 
 
 class FakeSnapshot:
@@ -205,7 +205,69 @@ class DispatchTests(unittest.TestCase):
              patch("archive_job.existing_archive_doc_id", return_value="existing"):
             self.assertIsNone(archive_work_once("key", "destination", "key", state, Mock()))
         state.mark_done.assert_not_called()
-        state.mark_retry.assert_called_once_with("key", "Existing transcript requires cleanup backfill", "processing")
+        state.mark_review.assert_called_once_with("key", "unverified_existing_archive", "processing")
+
+    def test_incomplete_existing_archive_is_sent_to_review_not_marked_done(self):
+        meeting = Meeting("key", "folder", "Demo", None, None, None,
+                          "source-doc", "Transcript", ("source-doc",))
+        state, drive = Mock(), Mock()
+        state.claim_for_work.return_value = {"source_root_ids": ["root"], "source_notes_id": "source-doc"}
+        drive.files.return_value.get.return_value.execute.return_value = {
+            "properties": {"transcript_cleanup_version": "1"}}
+        drive.files.return_value.export.return_value.execute.return_value = b''
+        with patch("archive_job.build", return_value=drive), \
+             patch("archive_job.find_meetings_across_roots", return_value=[meeting]), \
+             patch("archive_job.existing_archive_doc_id", return_value="existing"):
+            self.assertIsNone(archive_work_once("key", "destination", "key", state, Mock()))
+        state.mark_done.assert_not_called()
+        state.mark_review.assert_called_once_with("key", "incomplete_existing_archive", "processing")
+
+    def test_existing_marker_on_pending_work_dispatches_only_for_verification(self):
+        meeting = Meeting("key", "folder", "Demo", None, None, None,
+                          "source-doc", "Transcript", ("source-doc",))
+        state = Mock()
+        state.can_reconcile_existing.return_value = True
+        state.reserve_for_dispatch.return_value = True
+        launch = Mock(return_value='execution')
+        with patch("archive_checker.find_archived_recordings", return_value={"key"}), \
+             patch("archive_checker.find_meetings_across_roots", return_value=[meeting]):
+            result = check_once(["root"], "destination", "job", state, None, launch=launch)
+        self.assertEqual(result["dispatched_count"], 1)
+        state.can_reconcile_existing.assert_called_once_with("key")
+        launch.assert_called_once_with('job', 'key')
+
+    def test_matching_archive_checksum_allows_safe_recovery(self):
+        meeting = Meeting("key", "folder", "Demo", None, None, None,
+                          "source-doc", "Transcript", ("source-doc",))
+        state, drive = Mock(), Mock()
+        state.claim_for_work.return_value = {"source_root_ids": ["root"], "source_notes_id": "source-doc"}
+        text = b'Meeting\n\nMethod: AI-cleaned\n\nA complete transcript.\n'
+        drive.files.return_value.get.return_value.execute.return_value = {"properties": {
+            "transcript_cleanup_version": "1", "transcript_content_sha256": archive_content_digest(text)}}
+        drive.files.return_value.export.return_value.execute.return_value = text
+        with patch("archive_job.build", return_value=drive), \
+             patch("archive_job.find_meetings_across_roots", return_value=[meeting]), \
+             patch("archive_job.existing_archive_doc_id", return_value="existing"):
+            self.assertEqual(archive_work_once("key", "destination", "key", state, Mock()), "existing")
+        state.mark_done.assert_called_once_with("key", "existing")
+        state.mark_review.assert_not_called()
+
+    def test_review_marker_never_requeues_and_does_not_interrupt_active_worker(self):
+        state = ArchiveState.__new__(ArchiveState)
+        state.client, state.collection = FakeClient(), FakeCollection()
+        ref = state.collection.document("key")
+        ref.data.update({'status': 'pending'})
+        meeting = SimpleNamespace(source_key="key", folder_id="folder", notes_id="doc")
+        with patch("archive_state.firestore.transactional", lambda function: function):
+            self.assertTrue(state.can_reconcile_existing("key"))
+            self.assertTrue(state.mark_review("key", "incomplete_existing_archive", "pending"))
+            self.assertEqual(ref.data['status'], 'review')
+            self.assertFalse(state.can_reconcile_existing("key"))
+            self.assertFalse(state.reserve_for_dispatch(meeting, "root"))
+            self.assertIsNone(state.claim_for_work("key"))
+            ref.data.update({'status': 'processing', 'lease_until': datetime.now(timezone.utc) + timedelta(hours=1)})
+            self.assertFalse(state.can_reconcile_existing("key"))
+            self.assertEqual(ref.data['status'], 'processing')
 
     def test_direct_worker_rechecks_meet_record_and_reads_as_source_owner(self):
         meeting = Meeting(

@@ -10,7 +10,7 @@ from meeting_auth import default_credentials
 
 from intelligence_log_client import client as intelligence_log, diagnostics
 from archive_state import ArchiveState
-from audio_archive import (AudioGemini, drive_credentials, existing_archive_doc_id,
+from audio_archive import (AudioGemini, archive_content_digest, drive_credentials, existing_archive_doc_id,
                            find_meetings, find_meetings_across_roots,
                            owner_drive_credentials, process_meeting)
 from meet_archive_discovery import meeting_from_record
@@ -123,7 +123,15 @@ def work_once(source_key, destination_folder_id, api_key, state, credentials,
             metadata = drive.files().get(fileId=existing, fields="properties",
                                          supportsAllDrives=True).execute()
             if (metadata.get("properties") or {}).get("transcript_cleanup_version") != CLEANUP_VERSION:
-                state.mark_retry(source_key, "Existing transcript requires cleanup backfill", "processing")
+                state.mark_review(source_key, "unverified_existing_archive", "processing")
+                return None
+            digest = (metadata.get("properties") or {}).get("transcript_content_sha256")
+            if not digest:
+                state.mark_review(source_key, "incomplete_existing_archive", "processing")
+                return None
+            content = drive.files().export(fileId=existing, mimeType="text/plain").execute()
+            if not content or archive_content_digest(content) != digest:
+                state.mark_review(source_key, "incomplete_existing_archive", "processing")
                 return None
             state.mark_done(source_key, existing)
             log_event("meeting_archived", source_key)

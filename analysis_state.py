@@ -199,6 +199,19 @@ class AnalysisState:
             "analysis_updated_at": _now(),
         })
 
+    def mark_review(self, source_key, reason):
+        """Fence uncertain Drive writes away from automatic retries."""
+        ref = self.collection.document(source_key)
+        now = _now()
+
+        @firestore.transactional
+        def mark(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if snapshot.exists and snapshot.to_dict().get('analysis_status') == 'processing':
+                transaction.update(ref, {'analysis_status': 'review', 'analysis_review_reason': reason,
+                                         'analysis_lease_until': now, 'analysis_updated_at': now})
+        mark(self.client.transaction())
+
     def mark_retry(self, source_key, reason, expected_status):
         """Release only the failed claim, preserving any completed brief."""
         ref = self.collection.document(source_key)

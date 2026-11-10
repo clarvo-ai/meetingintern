@@ -6,7 +6,8 @@ from unittest.mock import Mock, patch
 from meeting_analysis import (EvidenceInventory, EvidencePoint, MAX_INVENTORY_CHARS,
                               MeetingBrief, _extract_evidence_inventory,
                               _ground_customer_sections, _prefer_company_spelling,
-                              format_brief, format_chat_message, post_chat_message)
+                              format_brief, format_chat_message, post_chat_message,
+                              create_or_find_brief, BriefWriteUncertain)
 from analysis_job import work_once
 
 
@@ -26,6 +27,22 @@ BRIEF = {
 
 
 class BriefTests(unittest.TestCase):
+    def test_uncertain_brief_write_is_not_deleted_or_blindly_retried(self):
+        drive, docs = Mock(), Mock()
+        drive.files.return_value.list.return_value.execute.return_value = {'files': []}
+        drive.files.return_value.create.return_value.execute.return_value = {'id': 'brief'}
+        docs.documents.return_value.batchUpdate.return_value.execute.side_effect = TimeoutError()
+        with self.assertRaises(BriefWriteUncertain):
+            create_or_find_brief(drive, docs, 'folder', 'source', 'transcript', 'title', BRIEF)
+        drive.files.return_value.delete.assert_not_called()
+
+    def test_unverified_existing_brief_is_not_appended_or_accepted(self):
+        drive, docs = Mock(), Mock()
+        drive.files.return_value.list.return_value.execute.return_value = {'files': [{'id': 'brief'}]}
+        drive.files.return_value.export.return_value.execute.return_value = b''
+        with self.assertRaises(BriefWriteUncertain):
+            create_or_find_brief(drive, docs, 'folder', 'source', 'transcript', 'title', BRIEF)
+        docs.documents.return_value.batchUpdate.assert_not_called()
     def test_brief_separates_agreed_actions_from_ideas_and_links_transcript(self):
         text = format_brief("Team planning", "source-doc", BRIEF)
         self.assertIn("Agreed actions\n• Prepare the demo (Owner: Juha; Due: Friday)", text)
@@ -163,6 +180,20 @@ class BriefTests(unittest.TestCase):
         post.assert_called_once_with("webhook", "MEETINGS", "source-key", "saved message")
         state.mark_sending.assert_called_once_with("source-key")
         state.mark_posted.assert_called_once_with("source-key", "message")
+
+    def test_uncertain_brief_is_marked_for_review_before_chat(self):
+        state = Mock()
+        state.claim_for_work.return_value = {"output_doc_id": "transcript", "analysis_payload": BRIEF}
+        drive = Mock()
+        drive.files.return_value.get.return_value.execute.return_value = {
+            "id": "transcript", "name": "Team - English Transcript", "parents": ["folder"]}
+        with patch('analysis_job.create_or_find_brief', side_effect=BriefWriteUncertain()), \
+             patch('analysis_job.post_chat_message') as post:
+            with self.assertRaises(BriefWriteUncertain):
+                work_once('source-key', state, drive, Mock(), 'key', 'webhook', 'MEETINGS')
+        state.mark_review.assert_called_once_with('source-key', 'uncertain_brief_write')
+        state.mark_sending.assert_not_called()
+        post.assert_not_called()
 
     def test_worker_uses_full_report_for_new_analysis(self):
         state = Mock()

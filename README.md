@@ -36,6 +36,16 @@ before resuming the old schedules. An interrupted worker can remain leased until
 its existing lease expires; do not force its claim or repeat an uncertain effect.
 This procedure is not a completed cutover until the live journey is verified.
 
+New transcripts and briefs store a digest of their intended complete text.
+When an interrupted write leaves a Drive document behind, a worker verifies its
+export before treating it as complete. Empty, modified, duplicate, or older
+documents without a digest enter Firestore `status=review` or
+`analysis_status=review` rather than being overwritten, deleted or blindly
+retried. Inspect the source and destination document and its associated Chat
+state before deciding on manual recovery. The digest ignores only Google Docs
+line-ending and blank-paragraph normalization. An uncertain Chat send remains
+separately marked for review; the receiver outbox is independent.
+
 ## Meet audio archive MVP
 
 `audio_archive.py` is a separate archive path for new Google Meet artifacts.

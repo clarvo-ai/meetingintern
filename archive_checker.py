@@ -100,7 +100,10 @@ def check_once(roots, destination_folder_id, job_name, state, drive, dispatch_li
             seen_recordings.add(meeting.recording_id)
         if (meeting.source_key in archived or meeting.notes_id in archived or
                 meeting.recording_id in archived):
-            continue
+            # An unfinished claim may have written the Doc before losing its
+            # acknowledgement. Re-dispatch only to verify that existing Doc.
+            if not state.can_reconcile_existing(meeting.source_key):
+                continue
         if len(dispatched) >= dispatch_limit:
             continue
         if not state.reserve_for_dispatch(meeting, root_ids[0], root_ids=root_ids):
