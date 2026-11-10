@@ -68,7 +68,7 @@ class CleanupTests(unittest.TestCase):
         original = "Attendees\nMiro Keimiöniemi\nTranscript\n12:30 is the start.\nMiro: Yes."
         self.assertEqual(clean_transcript(original, model), original)
         prompt = model._ask_text.call_args_list[0].args[0]
-        self.assertIn('"text": "12:30 is the start."', prompt)
+        self.assertIn('"text": "⟦MEETING_NUMBER_A⟧ is the start."', prompt)
         self.assertNotIn('"text": "Miro Keimi', prompt)
 
     def test_retries_invalid_or_missing_segments_then_fails(self):
@@ -110,6 +110,50 @@ class CleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "failed validation"):
                 clean_transcript("Miro: We need 3 seats.", model)
 
+    def test_numbers_survive_model_cleanup_and_are_audited_in_plain_text(self):
+        prompts = []
+        def reply(prompt, _limit, **kw):
+            prompts.append(prompt)
+            if issubclass(kw['response_schema'], CleanupAudit):
+                self.assertIn('We need 3 seats by 2026-12-04.', prompt)
+                return valid_reply(prompt, kw['response_schema'])
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1])
+            self.assertNotIn('3', items[0]['text'])
+            self.assertNotIn('2026', items[0]['text'])
+            return json.dumps({'segments': [{'id': items[0]['id'],
+                'text': items[0]['text'].replace(' uh ', ' ')}]})
+        model = Mock()
+        model._ask_text.side_effect = reply
+        result = clean_transcript('Miro: We uh need 3 seats by 2026-12-04.', model)
+        self.assertEqual(result, 'Miro: We need 3 seats by 2026-12-04.')
+        self.assertEqual(len(prompts), 2)
+
+    def test_missing_duplicated_or_reordered_number_placeholders_fail_closed(self):
+        for mutation in ('missing', 'duplicated', 'reordered'):
+            def reply(prompt, _limit, **kw):
+                items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nYour previous', 1)[0])
+                text = items[0]['text']
+                tokens = re.findall(r'⟦MEETING_NUMBER_[A-Z]+⟧', text)
+                self.assertEqual(len(tokens), 2)
+                if mutation == 'missing':
+                    text = text.replace(tokens[0], '')
+                elif mutation == 'duplicated':
+                    text += ' ' + tokens[0]
+                else:
+                    text = text.replace(tokens[0], 'TEMP').replace(tokens[1], tokens[0]).replace('TEMP', tokens[1])
+                return json.dumps({'segments': [{'id': items[0]['id'], 'text': text}]})
+            model = Mock()
+            model._ask_text.side_effect = reply
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(RuntimeError, 'failed validation'):
+                clean_transcript('Miro: We need 3 seats by 2026-12-04.', model)
+
+    def test_number_mask_handles_literal_markers_and_many_values(self):
+        from transcript_cleanup import _mask_numbers, _restore_numbers
+        original = '⟦MEETING_NUMBER_A⟧ ' + ' '.join(str(n) for n in range(30))
+        masked, mapping = _mask_numbers(original)
+        self.assertEqual(_restore_numbers(masked, mapping), original)
+        self.assertNotIn(' 29', masked)
+
     def test_failed_faithfulness_audit_blocks_publication(self):
         def reply(prompt, _limit, **kw):
             if issubclass(kw["response_schema"], CleanupAudit):
@@ -149,6 +193,30 @@ class CleanupTests(unittest.TestCase):
         first = {'id': '1', 'text': 'We can not review it tomorrow.'}
         second = {'id': '2', 'text': 'We can review it tomorrow.'}
         self.assertEqual(_cross_segment_copies([first], [second['text']], [first, second]), {'1'})
+
+    def test_context_contamination_retries_isolated_but_still_audits_context(self):
+        prompts = []
+        def reply(prompt, _limit, **kw):
+            prompts.append((issubclass(kw['response_schema'], CleanupAudit), prompt))
+            if issubclass(kw['response_schema'], CleanupAudit):
+                return valid_reply(prompt, kw['response_schema'])
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nReview feedback', 1)[0].split('\nYour previous', 1)[0])
+            has_context = bool(re.search(r'Earlier context:\s+Have you managed to finish this\?', prompt))
+            result = []
+            for item in items:
+                text = item['text']
+                if item['id'] == '1' and (len(items) > 1 or has_context):
+                    text = 'Have you managed to ask later.'
+                result.append({'id': item['id'], 'text': text})
+            return json.dumps({'segments': result})
+        model = Mock()
+        model._ask_text.side_effect = reply
+        original = 'Miro: Have you managed to finish this?\nJuha: I will ask later.'
+        self.assertEqual(clean_transcript(original, model), original)
+        self.assertTrue(any(re.search(r'Earlier context:\s+Have you managed to finish this\?', p)
+                            for is_audit, p in prompts if is_audit))
+        self.assertTrue(any('Earlier context: \nLater context: \nSegments:' in p
+                            for is_audit, p in prompts if not is_audit))
 
     def test_interrupted_sentences_keep_each_speaker_turn(self):
         model = Mock()

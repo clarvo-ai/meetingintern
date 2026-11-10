@@ -91,8 +91,12 @@ speaker and time boundaries are retained; only unambiguous full-name spelling
 matches are normalized. Incomplete responses, changed numbers or materially
 shortened segments are retried and then fail the archive job; an audio-backed,
 unresolved single-word turn can instead be marked `[unclear]`. Raw text is not
-published as a fallback. When audio alignment remains uncertain, an individual
-turn can be cleaned and audited again using only the source text. Set the roster environment variable and bind the
+published as a fallback. Numeric spans are protected with placeholders during
+cleanup, restored exactly, and checked in the independent audit. If contextual
+speech contaminates an individual turn, generation can retry in isolation;
+the audit and cross-turn checks still use surrounding speech. When audio
+alignment remains uncertain, an individual turn can be cleaned and audited
+again using only the source text. Set the roster environment variable and bind the
 company reference secret on the archive job when deploying this change. Optional
 `MEETING_TRANSCRIPT_TERMS_JSON` supplies verified product and tool names, for
 example `["Codex"]`; these are hints rather than proof of what was said.
