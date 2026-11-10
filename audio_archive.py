@@ -480,6 +480,8 @@ def extract_audio_chunks(recording_url, output_dir):
 
 class AudioGemini:
     def __init__(self, api_key, model="gemini-3.5-flash-lite"):
+        # HTTPX INFO logs contain resumable upload URLs and identifiers.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         self.client = genai.Client(api_key=api_key)
         self.model = model
 

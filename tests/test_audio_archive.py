@@ -1,6 +1,7 @@
 """Focused tests for matching and waiting on Meet artifacts."""
 
 import unittest
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
@@ -132,6 +133,15 @@ class MeetingDiscoveryTests(unittest.TestCase):
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_audio_client_suppresses_http_request_urls(self):
+        logger = logging.getLogger('httpx')
+        previous = logger.level
+        self.addCleanup(logger.setLevel, previous)
+        logger.setLevel(logging.INFO)
+        with patch('audio_archive.genai.Client'):
+            AudioGemini('test-key')
+        self.assertGreaterEqual(logger.level, logging.WARNING)
+
     def setUp(self):
         patcher = patch("transcript_cleanup.clean_transcript",
                         side_effect=lambda text, *_args, **_kwargs: "Cleaned " + text)

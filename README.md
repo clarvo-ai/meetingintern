@@ -18,7 +18,9 @@ does not fetch or print secret values and refuses inconsistent identities or
 settings. Its file includes private Drive and calendar settings. Install it as
 `/etc/meetingintern/config.json`, owned by root and readable only by the
 dedicated `meetingintern` service user. The runner loads referenced secrets at
-startup. The VM unit expects the existing protected meeting Logs credential.
+startup. `requirements-vm.lock` records the dependencies from the deployed
+archive image and is verified on the VM's Python version. The VM unit expects
+the existing protected meeting Logs credential.
 
 Do not run the VM supervisor concurrently with the Cloud schedulers during
 cutover. First install the code, dependencies, configuration, unit and local
