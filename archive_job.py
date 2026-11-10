@@ -6,6 +6,7 @@ import traceback
 
 import google.auth
 from googleapiclient.discovery import build
+from meeting_auth import default_credentials
 
 from intelligence_log_client import client as intelligence_log, diagnostics
 from archive_state import ArchiveState
@@ -162,7 +163,7 @@ def main():
     api_key = os.getenv("GOOGLE_AI_API_KEY")
     if not source_key or not destination or not api_key:
         raise ValueError("Missing archive worker configuration")
-    _, project_id = google.auth.default()
+    _, project_id = default_credentials()
     state = ArchiveState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
     service_account_email = os.getenv("MEETING_MEET_SERVICE_ACCOUNT_EMAIL")
     owners = (list(dict.fromkeys([

@@ -1,12 +1,14 @@
 """Independent Firestore claims for meeting briefs and Chat delivery."""
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from meeting_ready import outbox_changes
+from meeting_auth import default_credentials
 
 
 DISPATCH_LEASE = timedelta(minutes=10)
@@ -22,7 +24,8 @@ def _now():
 
 class AnalysisState:
     def __init__(self, project_id):
-        self.client = firestore.Client(project=project_id)
+        self.client = (firestore.Client(project=project_id, credentials=default_credentials()[0])
+                       if os.getenv('MEETING_VM_SERVICE_ACCOUNT') else firestore.Client(project=project_id))
         self.collection = self.client.collection("meeting_audio_archive")
 
     def candidates(self):

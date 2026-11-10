@@ -16,6 +16,7 @@ from google.auth.transport.requests import Request
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 from google.oauth2 import id_token
+from meeting_auth import default_credentials, vm_id_token
 
 from meeting_ready import (_aware, eligible_archive, load_config, outbox_changes,
                            valid_file_id, validate_event)
@@ -34,7 +35,8 @@ class MeetingReadyOutbox:
     """Lease each saved event independently from analysis and Chat status."""
 
     def __init__(self, project_id):
-        self.client = firestore.Client(project=project_id)
+        self.client = (firestore.Client(project=project_id, credentials=default_credentials()[0])
+                       if os.getenv('MEETING_VM_SERVICE_ACCOUNT') else firestore.Client(project=project_id))
         self.collection = self.client.collection("meeting_audio_archive")
 
     def candidates(self):
@@ -176,7 +178,8 @@ class MeetingReadyOutbox:
 def _id_token(config):
     """Obtain a Google ID token and fail closed on an accidental wrong identity."""
     request = functools.partial(Request(), timeout=20)
-    token = id_token.fetch_id_token(request, config.url)
+    token = (vm_id_token(config.url) if os.getenv('MEETING_VM_SERVICE_ACCOUNT')
+             else id_token.fetch_id_token(request, config.url))
     try:
         part = token.split(".")[1]
         claims = json.loads(base64.urlsafe_b64decode(part + "=" * (-len(part) % 4)))
@@ -261,7 +264,7 @@ def main():
         return
     if config is None:
         return
-    _, project = google.auth.default(scopes=["https://www.googleapis.com/auth/cloud-platform"])
+    _, project = default_credentials(scopes=["https://www.googleapis.com/auth/cloud-platform"])
     outbox = MeetingReadyOutbox(os.getenv("GOOGLE_CLOUD_PROJECT") or project)
     if args.reconcile:
         try:

@@ -11,6 +11,7 @@ import google.auth
 from flask import Flask, jsonify
 from google.auth.transport.requests import AuthorizedSession
 from googleapiclient.discovery import build
+from meeting_auth import default_credentials
 
 from analysis_state import AnalysisState
 from archive_state import ArchiveState
@@ -33,7 +34,7 @@ def launch_job(job_name, source_key, session=None, env_name="ARCHIVE_STATE_ID"):
     if not re.fullmatch(r"projects/[^/]+/locations/[^/]+/jobs/[^/]+", job_name):
         raise ValueError("Job name must be a full Cloud Run Job resource name")
     if session is None:
-        credentials, _ = google.auth.default(
+        credentials, _ = default_credentials(
             scopes=["https://www.googleapis.com/auth/cloud-platform"]
         )
         session = AuthorizedSession(credentials)
@@ -153,7 +154,7 @@ def auto_artifacts_upcoming():
 
 
 @app.post("/")
-def check_meetings():
+def check_meetings(launch_archive=launch_job, launch_analysis=launch_analysis_job):
     """The endpoint stays short; transcription happens in Cloud Run Jobs."""
     flat_roots = [item.strip() for item in os.getenv("MEETING_SOURCE_FOLDER_IDS", "").split(",") if item.strip()]
     roots = source_groups(flat_roots, os.getenv("MEETING_SOURCE_FOLDER_GROUPS_JSON"))
@@ -165,7 +166,7 @@ def check_meetings():
     not_before = datetime.fromisoformat(start_time.replace("Z", "+00:00"))
     if not_before.tzinfo is None:
         return jsonify({"error": "ARCHIVE_START_TIME must include a timezone"}), 500
-    credentials, project_id = google.auth.default()
+    credentials, project_id = default_credentials()
     del credentials
     state = ArchiveState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
     drive = build("drive", "v3", credentials=drive_credentials(), cache_discovery=False)
@@ -206,6 +207,7 @@ def check_meetings():
         dispatch_limit=int(os.getenv("ARCHIVE_DISPATCH_LIMIT", "5")),
         not_before=not_before,
         direct_meetings=direct_meetings,
+        launch=launch_archive,
     )
     result["meet_discovery_errors"] = len(direct_errors)
     analysis_job_name = os.getenv("ANALYSIS_JOB_NAME")
@@ -214,6 +216,7 @@ def check_meetings():
         result["analysis_dispatched_count"] = len(dispatch_analysis_jobs(
             analysis_state, analysis_job_name,
             dispatch_limit=int(os.getenv("ANALYSIS_DISPATCH_LIMIT", "5")),
+            launch=launch_analysis,
         ))
     return jsonify(result), 502 if direct_errors else 200
 

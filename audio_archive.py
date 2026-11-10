@@ -24,6 +24,7 @@ from pathlib import Path
 import google.auth
 import requests
 from google.auth import impersonated_credentials
+from meeting_auth import default_credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google import genai
 from google.genai import types
@@ -87,7 +88,7 @@ def drive_credentials(impersonate_service_account=None):
             target_scopes=["https://www.googleapis.com/auth/drive",
                            "https://www.googleapis.com/auth/documents"],
         )
-    credentials, _ = google.auth.default(
+    credentials, _ = default_credentials(
         scopes=["https://www.googleapis.com/auth/drive",
                 "https://www.googleapis.com/auth/documents"]
     )
@@ -96,7 +97,7 @@ def drive_credentials(impersonate_service_account=None):
 
 def owner_drive_credentials(service_account_email, owner_email, source_credentials=None):
     """Read an organizer's Meet files by ID without depending on Drive sharing."""
-    source = source_credentials or google.auth.default(
+    source = source_credentials or default_credentials(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )[0]
     return impersonated_credentials.Credentials(

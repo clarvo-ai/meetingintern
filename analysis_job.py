@@ -5,6 +5,7 @@ import os
 
 import google.auth
 from googleapiclient.discovery import build
+from meeting_auth import default_credentials
 
 from analysis_state import AnalysisState
 from audio_archive import drive_credentials, owner_drive_credentials
@@ -124,7 +125,7 @@ def main():
     space_id = os.getenv("MEETING_CHAT_SPACE_ID")
     if not source_key or not api_key or not webhook_url or not space_id:
         raise ValueError("Missing meeting analysis configuration")
-    _, project_id = google.auth.default()
+    _, project_id = default_credentials()
     state = AnalysisState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
     credentials = drive_credentials()
     drive = build("drive", "v3", credentials=credentials, cache_discovery=False)
