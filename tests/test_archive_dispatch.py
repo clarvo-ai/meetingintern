@@ -252,6 +252,21 @@ class DispatchTests(unittest.TestCase):
         state.mark_done.assert_called_once_with("key", "existing")
         state.mark_review.assert_not_called()
 
+    def test_changed_archive_checksum_requires_review(self):
+        meeting = Meeting("key", "folder", "Demo", None, None, None,
+                          "source-doc", "Transcript", ("source-doc",))
+        state, drive = Mock(), Mock()
+        state.claim_for_work.return_value = {"source_root_ids": ["root"], "source_notes_id": "source-doc"}
+        drive.files.return_value.get.return_value.execute.return_value = {"properties": {
+            "transcript_cleanup_version": "1", "transcript_content_sha256": archive_content_digest('Complete transcript')}}
+        drive.files.return_value.export.return_value.execute.return_value = b'Changed transcript'
+        with patch("archive_job.build", return_value=drive), \
+             patch("archive_job.find_meetings_across_roots", return_value=[meeting]), \
+             patch("archive_job.existing_archive_doc_id", return_value="existing"):
+            self.assertIsNone(archive_work_once("key", "destination", "key", state, Mock()))
+        state.mark_review.assert_called_once_with('key', 'incomplete_existing_archive', 'processing')
+        state.mark_done.assert_not_called()
+
     def test_review_marker_never_requeues_and_does_not_interrupt_active_worker(self):
         state = ArchiveState.__new__(ArchiveState)
         state.client, state.collection = FakeClient(), FakeCollection()

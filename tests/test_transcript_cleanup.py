@@ -230,6 +230,19 @@ class CleanupTests(unittest.TestCase):
         self.assertEqual([int(value) for value in re.findall(r"item (\d+)", result)], list(range(32)))
         self.assertEqual(model._with_uploaded_audio.call_count, 64)
 
+    def test_many_short_turns_fit_provider_schema_and_remain_in_order(self):
+        from google.genai.errors import ClientError
+        def reply(_path, prompt, _limit, **kw):
+            audit = issubclass(kw['response_schema'], CleanupAudit)
+            items = json.loads(prompt.rsplit('Audit segments: ' if audit else 'Segments: ', 1)[1])
+            if len(items) > 50:
+                raise ClientError(400, {'error': {'message': 'invalid argument', 'status': 'INVALID_ARGUMENT'}})
+            return valid_reply(prompt, kw['response_schema'])
+        model = Mock()
+        model._with_uploaded_audio.side_effect = reply
+        original = '\n'.join(f'Speaker 1: We discussed item {i}.' for i in range(97))
+        self.assertEqual(clean_transcript(original, model, audio_chunks=['audio']), original)
+
     def test_verified_company_mentions_are_available_across_audio_chunks(self):
         model = Mock()
         model._with_uploaded_audio.side_effect = lambda _path, prompt, _limit, **kw: valid_reply(prompt, kw.get("response_schema"))

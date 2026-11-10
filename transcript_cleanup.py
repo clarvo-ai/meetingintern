@@ -13,6 +13,7 @@ from pydantic import BaseModel, Field, create_model
 CLEANUP_VERSION = "1"
 LOGGER = logging.getLogger(__name__)
 MAX_BATCH_CHARS = 6000
+MAX_BATCH_SEGMENTS = 32
 MAX_PIECE_CHARS = 2500
 OVERLAP_CHARS = 600
 MAX_ATTEMPTS = 3
@@ -176,6 +177,7 @@ def _batches(pieces):
     result, current, size, audio_index = [], [], 0, None
     for piece in pieces:
         if current and (size + len(piece["text"]) > MAX_BATCH_CHARS or
+                        len(current) >= MAX_BATCH_SEGMENTS or
                         piece["audio_index"] != audio_index):
             result.append(current)
             current, size = [], 0

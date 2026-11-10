@@ -43,6 +43,17 @@ class BriefTests(unittest.TestCase):
         with self.assertRaises(BriefWriteUncertain):
             create_or_find_brief(drive, docs, 'folder', 'source', 'transcript', 'title', BRIEF)
         docs.documents.return_value.batchUpdate.assert_not_called()
+
+    def test_existing_brief_with_different_generated_content_needs_review(self):
+        from audio_archive import archive_content_digest
+        drive, docs = Mock(), Mock()
+        drive.files.return_value.list.return_value.execute.return_value = {'files': [
+            {'id': 'brief', 'properties': {'brief_content_sha256': archive_content_digest('old brief')}}]}
+        drive.files.return_value.export.return_value.execute.return_value = b'old brief'
+        with self.assertRaises(BriefWriteUncertain):
+            create_or_find_brief(drive, docs, 'folder', 'source', 'transcript', 'title', BRIEF,
+                                 formatter=lambda *_: 'new brief')
+        docs.documents.return_value.batchUpdate.assert_not_called()
     def test_brief_separates_agreed_actions_from_ideas_and_links_transcript(self):
         text = format_brief("Team planning", "source-doc", BRIEF)
         self.assertIn("Agreed actions\n• Prepare the demo (Owner: Juha; Due: Friday)", text)
