@@ -94,7 +94,9 @@ unresolved single-word turn can instead be marked `[unclear]`. Raw text is not
 published as a fallback. Numeric spans are protected with placeholders during
 cleanup, restored exactly, and checked in the independent audit. If contextual
 speech contaminates an individual turn, generation can retry in isolation;
-the audit and cross-turn checks still use surrounding speech. When audio
+the audit and cross-turn checks still use surrounding speech. Ambiguous short
+phrase overlaps require a second independent review; obvious insertions,
+longer overlaps and negation changes are never cleared by that review. When audio
 alignment remains uncertain, an individual turn can be cleaned and audited
 again using only the source text. Set the roster environment variable and bind the
 company reference secret on the archive job when deploying this change. Optional

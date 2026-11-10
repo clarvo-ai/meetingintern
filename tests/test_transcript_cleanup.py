@@ -5,7 +5,7 @@ import re
 import unittest
 from unittest.mock import Mock
 
-from transcript_cleanup import CleanupAudit, clean_transcript, parse_spelling_hints
+from transcript_cleanup import CleanupAudit, CrossTurnAudit, clean_transcript, parse_spelling_hints
 
 
 def valid_reply(prompt, schema=None):
@@ -194,6 +194,63 @@ class CleanupTests(unittest.TestCase):
         second = {'id': '2', 'text': 'We can review it tomorrow.'}
         self.assertEqual(_cross_segment_copies([first], [second['text']], [first, second]), {'1'})
 
+    def test_common_phrase_requires_two_independent_reviews(self):
+        original = 'Miro: We should check the new issue.\nJuha: Let us check a new plan today.'
+        def run(second_review):
+            model = Mock()
+            def reply(prompt, _limit, **kw):
+                if issubclass(kw['response_schema'], CrossTurnAudit):
+                    if second_review is None:
+                        return '{}'
+                    targets = json.loads(prompt.rsplit('Cross-turn cases: ', 1)[1])
+                    return json.dumps({'segments': [{'id': x['id'],
+                        'faithful': second_review, 'copied': not second_review} for x in targets]})
+                if issubclass(kw['response_schema'], CleanupAudit):
+                    return valid_reply(prompt, kw['response_schema'])
+                items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nReview feedback', 1)[0].split('\nYour previous', 1)[0])
+                return json.dumps({'segments': [{'id': item['id'], 'text':
+                    item['text'].replace('check a new plan', 'check the new plan')} for item in items]})
+            model._ask_text.side_effect = reply
+            return clean_transcript(original, model)
+        self.assertEqual(run(True), original.replace('check a new plan', 'check the new plan'))
+        with self.assertRaisesRegex(RuntimeError, 'failed validation'):
+            run(False)
+        with self.assertRaisesRegex(RuntimeError, 'failed validation'):
+            run(None)
+
+    def test_obvious_cross_turn_insertion_cannot_be_overridden(self):
+        from transcript_cleanup import _reviewable_cross_turns
+        first = {'id': '0', 'speaker': 'Miro', 'text': 'Have you managed to finish this?'}
+        second = {'id': '1', 'speaker': 'Juha', 'text': 'I will ask later.'}
+        self.assertFalse(_reviewable_cross_turns([second], ['Have you managed to ask later.'],
+                                                  [first, second], {'1'}))
+
+    def test_second_cross_turn_review_cannot_override_failed_first_audit(self):
+        model = Mock()
+        cross_calls = []
+        def reply(prompt, _limit, **kw):
+            if issubclass(kw['response_schema'], CrossTurnAudit):
+                cross_calls.append(True)
+                return '{}'
+            if issubclass(kw['response_schema'], CleanupAudit):
+                targets = json.loads(prompt.rsplit('Audit segments: ', 1)[1])
+                return json.dumps({'segments': [{'id': x['id'], 'faithful': x['id'] == '0'} for x in targets]})
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nReview feedback', 1)[0].split('\nYour previous', 1)[0])
+            return json.dumps({'segments': [{'id': x['id'], 'text':
+                x['text'].replace('check a new plan', 'check the new plan')} for x in items]})
+        model._ask_text.side_effect = reply
+        with self.assertRaisesRegex(RuntimeError, 'failed validation'):
+            clean_transcript('Miro: We should check the new issue.\nJuha: Let us check a new plan today.', model)
+        self.assertEqual(cross_calls, [])
+
+    def test_removed_negation_cannot_be_overridden(self):
+        from transcript_cleanup import _reviewable_cross_turns
+        for original, cleaned in (('We can not review it tomorrow.', 'We can review it tomorrow.'),
+                                  ("We can't review it tomorrow.", 'We can review it tomorrow.')):
+            first = {'id': '1', 'speaker': 'Miro', 'text': original}
+            second = {'id': '2', 'speaker': 'Juha', 'text': cleaned}
+            self.assertFalse(_reviewable_cross_turns([first], [cleaned], [first, second], {'1'}))
+
     def test_context_contamination_retries_isolated_but_still_audits_context(self):
         prompts = []
         def reply(prompt, _limit, **kw):
@@ -216,6 +273,9 @@ class CleanupTests(unittest.TestCase):
         self.assertTrue(any(re.search(r'Earlier context:\s+Have you managed to finish this\?', p)
                             for is_audit, p in prompts if is_audit))
         self.assertTrue(any('Earlier context: \nLater context: \nSegments:' in p
+                            for is_audit, p in prompts if not is_audit))
+        self.assertTrue(any('This is the final isolated retry' in p and
+                            'Preserve the original wording' in p
                             for is_audit, p in prompts if not is_audit))
 
     def test_interrupted_sentences_keep_each_speaker_turn(self):
