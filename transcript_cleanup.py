@@ -236,12 +236,20 @@ def _trigrams(text):
 
 def _cross_segment_copies(batch, cleaned, surrounding):
     """Find phrases borrowed from a different speaker turn or adjacent batch."""
+    def without_fillers(text):
+        words = re.findall(r"[^\W_]+", text.casefold())
+        return [word for word in words if word not in {"uh", "um", "erm"}]
+
     sources = {}
     for piece in surrounding:
         for phrase in _trigrams(piece["text"]):
             sources.setdefault(phrase, set()).add(piece["id"])
     failed = set()
     for piece, value in zip(batch, cleaned):
+        # Removing an isolated filler can join common words into a phrase that
+        # another speaker also used. It is not evidence of moving their speech.
+        if without_fillers(piece["text"]) == without_fillers(value):
+            continue
         original = _trigrams(piece["text"])
         for phrase in _trigrams(value) - original:
             if any(other != piece["id"] for other in sources.get(phrase, ())):

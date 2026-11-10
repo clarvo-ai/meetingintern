@@ -131,6 +131,25 @@ class CleanupTests(unittest.TestCase):
         with self.assertRaisesRegex(RuntimeError, "failed validation"):
             clean_transcript(original, model)
 
+    def test_removing_a_filler_is_not_mistaken_for_copying_another_turn(self):
+        def reply(prompt, _limit, **kw):
+            if issubclass(kw['response_schema'], CleanupAudit):
+                return valid_reply(prompt, kw['response_schema'])
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1])
+            return json.dumps({'segments': [{'id': item['id'],
+                'text': item['text'].replace(' uh ', ' ')} for item in items]})
+        model = Mock()
+        model._ask_text.side_effect = reply
+        original = 'Speaker 1: We can uh review it tomorrow.\nSpeaker 2: We can review it tomorrow.'
+        self.assertEqual(clean_transcript(original, model),
+                         'Speaker 1: We can review it tomorrow.\nSpeaker 2: We can review it tomorrow.')
+
+    def test_removing_negation_is_still_flagged_as_cross_turn_copying(self):
+        from transcript_cleanup import _cross_segment_copies
+        first = {'id': '1', 'text': 'We can not review it tomorrow.'}
+        second = {'id': '2', 'text': 'We can review it tomorrow.'}
+        self.assertEqual(_cross_segment_copies([first], [second['text']], [first, second]), {'1'})
+
     def test_interrupted_sentences_keep_each_speaker_turn(self):
         model = Mock()
         model._ask_text.side_effect = lambda prompt, _limit, **kw: valid_reply(prompt, kw.get("response_schema"))
