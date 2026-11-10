@@ -36,6 +36,25 @@ class VMRunnerTests(unittest.TestCase):
         with self.assertRaises(ValueError):
             runner.launch('archive', '../../invalid')
 
+    def test_checker_dispatches_to_vm_workers_not_cloud_jobs(self):
+        from flask import jsonify
+        process = Mock()
+        process.poll.return_value = None
+        spawn = Mock(return_value=process)
+        runner = Runner(spawn)
+        self.addCleanup(runner.pool.shutdown)
+        def checker(launch_archive, launch_analysis):
+            launch_archive('cloud-job', 'a' * 64)
+            launch_analysis('cloud-job', 'b' * 64)
+            return jsonify({'ready_count': 1})
+        with patch('vm_runner.archive_checker.check_meetings', side_effect=checker):
+            runner.check()
+        self.assertEqual(spawn.call_count, 2)
+        self.assertTrue(spawn.call_args_list[0].args[0][-1].endswith('archive_job.py'))
+        self.assertTrue(spawn.call_args_list[1].args[0][-1].endswith('analysis_job.py'))
+        self.assertEqual(spawn.call_args_list[0].kwargs['env']['ARCHIVE_STATE_ID'], 'a' * 64)
+        self.assertEqual(spawn.call_args_list[1].kwargs['env']['ANALYSIS_STATE_ID'], 'b' * 64)
+
     def test_long_running_archive_is_stopped_before_its_lease_expires(self):
         process = Mock()
         process.poll.return_value = None
