@@ -6,6 +6,7 @@ from datetime import datetime, timedelta, timezone
 
 import google.auth
 from google.auth import impersonated_credentials
+from meeting_auth import default_credentials
 from googleapiclient.discovery import build
 
 
@@ -31,13 +32,13 @@ def calendar_ids(raw, allow_empty=False):
 
 
 def calendar_client(credentials=None):
-    credentials = credentials or google.auth.default(scopes=[CALENDAR_SCOPE])[0]
+    credentials = credentials or default_credentials(scopes=[CALENDAR_SCOPE])[0]
     return build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
 
 def meet_settings_client(service_account_email, organizer_email, source_credentials=None):
     """Use keyless delegation so only the actual organizer changes their space."""
-    source = source_credentials or google.auth.default(
+    source = source_credentials or default_credentials(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )[0]
     delegated = impersonated_credentials.Credentials(

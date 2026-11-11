@@ -1,0 +1,37 @@
+[Unit]
+Description=MeetingIntern VM scheduler and worker supervisor
+Wants=network-online.target
+After=network-online.target
+
+[Service]
+Type=exec
+User=meetingintern
+Group=meetingintern
+WorkingDirectory=/opt/meetingintern/app
+Environment=MEETING_VM_CONFIG=/etc/meetingintern/config.json
+Environment=MEETING_VM_LOCK_PATH=/var/lib/meetingintern/runner.lock
+Environment=CLARVO_LOGS_URL=http://127.0.0.1:18359/logs/api/v1/events
+Environment=CLARVO_LOGS_TOKEN_FILE=%d/log-token
+Environment=PYTHONUNBUFFERED=1
+Environment=PYTHONDONTWRITEBYTECODE=1
+LoadCredential=log-token:/etc/clarvo-intelligence-logs/credentials/meeting
+ExecStart=/opt/meetingintern/venv/bin/python vm_runner.py
+Restart=on-failure
+RestartSec=30
+StateDirectory=meetingintern
+StateDirectoryMode=0700
+UMask=0077
+NoNewPrivileges=true
+PrivateTmp=true
+PrivateDevices=true
+ProtectSystem=strict
+ProtectHome=true
+ProtectKernelTunables=true
+ProtectKernelModules=true
+ProtectControlGroups=true
+RestrictAddressFamilies=AF_UNIX AF_INET AF_INET6
+RestrictSUIDSGID=true
+LockPersonality=true
+
+[Install]
+WantedBy=multi-user.target

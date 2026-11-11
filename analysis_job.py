@@ -5,6 +5,7 @@ import os
 
 import google.auth
 from googleapiclient.discovery import build
+from meeting_auth import default_credentials
 
 from analysis_state import AnalysisState
 from audio_archive import drive_credentials, owner_drive_credentials
@@ -15,7 +16,7 @@ from meeting_evidence import (archived_speech_body, calendar_client,
                               parse_team_roster, resolve_speaker_identities,
                               source_evidence)
 from meeting_analysis import (create_or_find_brief, format_chat_message, post_chat_message,
-                              ChatDeliveryRejected, ChatDeliveryUncertain)
+                              BriefWriteUncertain, ChatDeliveryRejected, ChatDeliveryUncertain)
 from meeting_report_v2 import generate_report, format_report_brief, format_report_chat
 from meeting_ready import load_config as load_meeting_ready_config
 from transcript_cleanup import parse_spelling_hints
@@ -82,13 +83,17 @@ def work_once(source_key, state, drive, docs, api_key, webhook_url, space_id,
             payload = generate_report(api_key, transcript, evidence, roster or {}, model,
                                       company_references or [], spelling_hints=spelling_hints)
         report_v2 = "headline" in payload
-        brief_doc_id = data.get("analysis_brief_doc_id") or create_or_find_brief(
-            drive, docs, item["parents"][0], source_key,
-            transcript_doc_id, title, payload,
-            formatter=(lambda _title, doc_id, report: format_report_brief(
-                report, doc_id, roster or {})) if report_v2 else None,
-            schema_version="2" if report_v2 else "1",
-        )
+        try:
+            brief_doc_id = data.get("analysis_brief_doc_id") or create_or_find_brief(
+                drive, docs, item["parents"][0], source_key,
+                transcript_doc_id, title, payload,
+                formatter=(lambda _title, doc_id, report: format_report_brief(
+                    report, doc_id, roster or {})) if report_v2 else None,
+                schema_version="2" if report_v2 else "1",
+            )
+        except BriefWriteUncertain:
+            state.mark_review(source_key, 'uncertain_brief_write')
+            raise
         chat_text = data.get("analysis_chat_text") or (
             format_report_chat(payload, transcript_doc_id, brief_doc_id, roster or {})
             if report_v2 else format_chat_message(title, transcript_doc_id, brief_doc_id, payload)
@@ -124,7 +129,7 @@ def main():
     space_id = os.getenv("MEETING_CHAT_SPACE_ID")
     if not source_key or not api_key or not webhook_url or not space_id:
         raise ValueError("Missing meeting analysis configuration")
-    _, project_id = google.auth.default()
+    _, project_id = default_credentials()
     state = AnalysisState(os.getenv("GOOGLE_CLOUD_PROJECT") or project_id)
     credentials = drive_credentials()
     drive = build("drive", "v3", credentials=credentials, cache_discovery=False)

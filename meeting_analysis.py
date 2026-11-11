@@ -11,7 +11,7 @@ from google.genai import types
 from pydantic import BaseModel, Field
 import requests
 
-from audio_archive import DOC_MIME
+from audio_archive import DOC_MIME, archive_content_digest
 from meeting_evidence import apply_classification_evidence
 
 
@@ -26,6 +26,12 @@ class ChatDeliveryRejected(RuntimeError):
 
 class ChatDeliveryUncertain(RuntimeError):
     """The request may have created a message; do not retry automatically."""
+
+
+class BriefWriteUncertain(RuntimeError):
+    """A Drive brief may have been created or written; require reconciliation."""
+
+
 MEETING_TYPE = Literal[
     "team_internal", "prospect_sales_demo", "existing_customer", "investor",
     "partner", "recruiting", "other_external", "unknown",
@@ -477,17 +483,26 @@ def create_or_find_brief(drive, docs, folder_id, source_key, transcript_doc_id,
         f"mimeType = '{DOC_MIME}' and "
         f"properties has {{ key='analysis_source_key' and value='{source_key}' }}"
     )
+    content = (formatter or format_brief)(title, transcript_doc_id, payload)
+    digest = archive_content_digest(content)
     result = drive.files().list(
-        q=query, fields="files(id,name)", pageSize=100,
+        q=query, fields="files(id,name,properties)", pageSize=100,
         supportsAllDrives=True, includeItemsFromAllDrives=True,
     ).execute()
     existing = result.get("files", [])
     if existing:
+        if len(existing) != 1:
+            raise BriefWriteUncertain('Multiple brief documents require review')
         doc_id = existing[0]["id"]
-        raw = drive.files().export(fileId=doc_id, mimeType="text/plain").execute()
-        if (raw.decode("utf-8-sig") if isinstance(raw, bytes) else raw).strip():
+        try:
+            raw = drive.files().export(fileId=doc_id, mimeType="text/plain").execute()
+        except Exception as error:
+            raise BriefWriteUncertain('Existing brief could not be verified') from error
+        saved_digest = (existing[0].get('properties') or {}).get('brief_content_sha256')
+        if saved_digest and saved_digest == digest == archive_content_digest(raw):
             return doc_id
-    else:
+        raise BriefWriteUncertain('Existing brief requires review')
+    try:
         created = drive.files().create(
             body={
                 "name": f"{title} - Meeting Brief",
@@ -497,22 +512,19 @@ def create_or_find_brief(drive, docs, folder_id, source_key, transcript_doc_id,
                     "analysis_source_key": source_key,
                     "source_transcript_id": transcript_doc_id,
                     "analysis_schema_version": schema_version,
+                    "brief_content_sha256": digest,
                 },
             },
             fields="id", supportsAllDrives=True,
         ).execute()
         doc_id = created["id"]
-    try:
         docs.documents().batchUpdate(
             documentId=doc_id,
             body={"requests": [{"insertText": {"location": {"index": 1},
-                                               "text": (formatter or format_brief)(
-                                                   title, transcript_doc_id, payload)}}]},
+                                               "text": content}}]},
         ).execute()
-    except Exception:
-        if not existing:
-            drive.files().delete(fileId=doc_id, supportsAllDrives=True).execute()
-        raise
+    except Exception as error:
+        raise BriefWriteUncertain('Brief write result requires review') from error
     return doc_id
 
 

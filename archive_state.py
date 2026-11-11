@@ -1,10 +1,12 @@
 """Firestore claims for 15-minute discovery and long-running archive jobs."""
 
 from datetime import datetime, timedelta, timezone
+import os
 
 from google.cloud import firestore
 
 from meeting_evidence import _source_time
+from meeting_auth import default_credentials
 
 
 DISPATCH_LEASE = timedelta(minutes=10)
@@ -36,7 +38,8 @@ def _verified_meeting_start(meeting):
 
 class ArchiveState:
     def __init__(self, project_id):
-        self.client = firestore.Client(project=project_id)
+        self.client = (firestore.Client(project=project_id, credentials=default_credentials()[0])
+                       if os.getenv('MEETING_VM_SERVICE_ACCOUNT') else firestore.Client(project=project_id))
         self.collection = self.client.collection("meeting_audio_archive")
 
     def reserve_for_dispatch(self, meeting, root_id, root_ids=None):
@@ -48,7 +51,7 @@ class ArchiveState:
         def reserve(transaction):
             snapshot = ref.get(transaction=transaction)
             data = snapshot.to_dict() if snapshot.exists else {}
-            if data.get("status") in ("done", "skipped"):
+            if data.get("status") in ("done", "skipped", "review"):
                 return False
             if data.get("status") in ("dispatching", "queued", "processing") and _lease_active(data, now):
                 return False
@@ -111,7 +114,7 @@ class ArchiveState:
             if not snapshot.exists:
                 return None
             data = snapshot.to_dict()
-            if data.get("status") in ("done", "skipped"):
+            if data.get("status") in ("done", "skipped", "review"):
                 return None
             if data.get("status") == "processing" and _lease_active(data, now):
                 return None
@@ -125,6 +128,33 @@ class ArchiveState:
             return data
 
         return claim(self.client.transaction())
+
+    def mark_review(self, source_key, reason, expected_status):
+        """Retain an uncertain external write for human reconciliation."""
+        now = _utc_now()
+        ref = self.collection.document(source_key)
+
+        @firestore.transactional
+        def mark(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if snapshot.exists and snapshot.to_dict().get('status') == expected_status:
+                transaction.update(ref, {'status': 'review', 'archive_review_reason': reason,
+                                         'lease_until': now, 'updated_at': now})
+                return True
+            return False
+        return mark(self.client.transaction())
+
+    def can_reconcile_existing(self, source_key):
+        """Allow only unfinished records to inspect an existing Drive marker."""
+        now = _utc_now()
+        ref = self.collection.document(source_key)
+        snapshot = ref.get()
+        if not snapshot.exists:
+            return False
+        data = snapshot.to_dict()
+        if data.get('status') not in ('pending', 'dispatching', 'queued', 'processing'):
+            return False
+        return not (data.get('status') in ('dispatching', 'queued', 'processing') and _lease_active(data, now))
 
     def mark_done(self, source_key, output_doc_id=None):
         """Finish archiving and queue analysis in the same document update."""

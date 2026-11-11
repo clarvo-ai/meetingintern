@@ -1,12 +1,14 @@
 """Independent Firestore claims for meeting briefs and Chat delivery."""
 
 import logging
+import os
 from datetime import datetime, timedelta, timezone
 
 from google.cloud import firestore
 from google.cloud.firestore_v1.base_query import FieldFilter
 
 from meeting_ready import outbox_changes
+from meeting_auth import default_credentials
 
 
 DISPATCH_LEASE = timedelta(minutes=10)
@@ -22,7 +24,8 @@ def _now():
 
 class AnalysisState:
     def __init__(self, project_id):
-        self.client = firestore.Client(project=project_id)
+        self.client = (firestore.Client(project=project_id, credentials=default_credentials()[0])
+                       if os.getenv('MEETING_VM_SERVICE_ACCOUNT') else firestore.Client(project=project_id))
         self.collection = self.client.collection("meeting_audio_archive")
 
     def candidates(self):
@@ -195,6 +198,19 @@ class AnalysisState:
             "analysis_last_error": str(reason)[:300],
             "analysis_updated_at": _now(),
         })
+
+    def mark_review(self, source_key, reason):
+        """Fence uncertain Drive writes away from automatic retries."""
+        ref = self.collection.document(source_key)
+        now = _now()
+
+        @firestore.transactional
+        def mark(transaction):
+            snapshot = ref.get(transaction=transaction)
+            if snapshot.exists and snapshot.to_dict().get('analysis_status') == 'processing':
+                transaction.update(ref, {'analysis_status': 'review', 'analysis_review_reason': reason,
+                                         'analysis_lease_until': now, 'analysis_updated_at': now})
+        mark(self.client.transaction())
 
     def mark_retry(self, source_key, reason, expected_status):
         """Release only the failed claim, preserving any completed brief."""

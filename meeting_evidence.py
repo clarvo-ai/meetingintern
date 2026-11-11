@@ -9,6 +9,7 @@ from urllib.parse import urlparse
 
 import google.auth
 from google.auth import impersonated_credentials
+from meeting_auth import default_credentials
 from googleapiclient.discovery import build
 from googleapiclient.errors import HttpError
 
@@ -268,7 +269,7 @@ def resolve_speaker_identities(evidence, roster):
 
 def meet_client_for_user(service_account_email, user_email, source_credentials=None):
     """Use keyless domain-wide delegation for the one known source owner."""
-    source = source_credentials or google.auth.default(
+    source = source_credentials or default_credentials(
         scopes=["https://www.googleapis.com/auth/cloud-platform"])[0]
     credentials = impersonated_credentials.Credentials(
         source_credentials=source,
@@ -464,7 +465,7 @@ def calendar_client(calendar_ids):
     """Calendar access is optional until the Cloud Run identity receives it."""
     if not calendar_ids:
         return None
-    credentials, _ = google.auth.default(scopes=[CALENDAR_SCOPE])
+    credentials, _ = default_credentials(scopes=[CALENDAR_SCOPE])
     return build("calendar", "v3", credentials=credentials, cache_discovery=False)
 
 

@@ -1,5 +1,51 @@
 # MeetingIntern
 
+## VM migration (staged)
+
+`vm_runner.py` runs discovery every 15 minutes, premeeting settings every 15
+minutes, and the durable meeting-ready outbox every five minutes. It supervises
+the existing archive and analysis workers and uses the same Firestore records,
+source keys, retry delays, Chat uncertainty handling and receiver IDs. A single
+local lock and the existing Firestore leases protect worker claims. VM metadata
+credentials impersonate the same service account as Cloud Run; audience-bound
+ID tokens are minted with that identity. The VM must have sufficient temporary
+disk for audio, ffmpeg/ffprobe, access to the original Firestore project and
+Secret Manager, and permission to impersonate that service account.
+
+Use `prepare_vm_config.py` to copy the current Cloud Run environment settings
+and Secret Manager references into a **new** mode-0600 configuration file; it
+does not fetch or print secret values and refuses inconsistent identities or
+settings. Its file includes private Drive and calendar settings. Install it as
+`/etc/meetingintern/config.json`, owned by root and readable only by the
+dedicated `meetingintern` service user. The runner loads referenced secrets at
+startup. `requirements-vm.lock` records the dependencies from the deployed
+archive image and is verified on the VM's Python version. The VM unit expects
+the existing protected meeting Logs credential.
+
+Do not run the VM supervisor concurrently with the Cloud schedulers during
+cutover. First install the code, dependencies, configuration, unit and local
+tests without starting it. Pause the checker, auto-artifacts and meeting-ready
+Cloud Scheduler jobs. Wait for all already-running checker requests and archive,
+analysis and delivery job executions to finish; do not reset Firestore leases
+or rerun uncertain Chat sends. Verify the premeeting scan has also finished.
+Start one VM supervisor, verify a new meeting reaches Drive, analysis, Chat and
+both receivers exactly once, and check pending/review and retry state. Leave the
+old schedules paused only after verification; preserve cloud jobs for rollback.
+For rollback, stop the VM service and wait for its entire process group to exit
+before resuming the old schedules. An interrupted worker can remain leased until
+its existing lease expires; do not force its claim or repeat an uncertain effect.
+This procedure is not a completed cutover until the live journey is verified.
+
+New transcripts and briefs store a digest of their intended complete text.
+When an interrupted write leaves a Drive document behind, a worker verifies its
+export before treating it as complete. Empty, modified, duplicate, or older
+documents without a digest enter Firestore `status=review` or
+`analysis_status=review` rather than being overwritten, deleted or blindly
+retried. Inspect the source and destination document and its associated Chat
+state before deciding on manual recovery. The digest ignores only Google Docs
+line-ending and blank-paragraph normalization. An uncertain Chat send remains
+separately marked for review; the receiver outbox is independent.
+
 ## Meet audio archive MVP
 
 `audio_archive.py` is a separate archive path for new Google Meet artifacts.
@@ -45,8 +91,14 @@ speaker and time boundaries are retained; only unambiguous full-name spelling
 matches are normalized. Incomplete responses, changed numbers or materially
 shortened segments are retried and then fail the archive job; an audio-backed,
 unresolved single-word turn can instead be marked `[unclear]`. Raw text is not
-published as a fallback. When audio alignment remains uncertain, an individual
-turn can be cleaned and audited again using only the source text. Set the roster environment variable and bind the
+published as a fallback. Numeric spans are protected with placeholders during
+cleanup, restored exactly, and checked in the independent audit. If contextual
+speech contaminates an individual turn, generation can retry in isolation;
+the audit and cross-turn checks still use surrounding speech. Ambiguous short
+phrase overlaps require a second independent review; obvious insertions,
+longer overlaps and negation changes are never cleared by that review. When audio
+alignment remains uncertain, an individual turn can be cleaned and audited
+again using only the source text. Set the roster environment variable and bind the
 company reference secret on the archive job when deploying this change. Optional
 `MEETING_TRANSCRIPT_TERMS_JSON` supplies verified product and tool names, for
 example `["Codex"]`; these are hints rather than proof of what was said.

@@ -5,7 +5,7 @@ import re
 import unittest
 from unittest.mock import Mock
 
-from transcript_cleanup import CleanupAudit, clean_transcript, parse_spelling_hints
+from transcript_cleanup import CleanupAudit, CrossTurnAudit, clean_transcript, parse_spelling_hints
 
 
 def valid_reply(prompt, schema=None):
@@ -68,7 +68,7 @@ class CleanupTests(unittest.TestCase):
         original = "Attendees\nMiro Keimiöniemi\nTranscript\n12:30 is the start.\nMiro: Yes."
         self.assertEqual(clean_transcript(original, model), original)
         prompt = model._ask_text.call_args_list[0].args[0]
-        self.assertIn('"text": "12:30 is the start."', prompt)
+        self.assertIn('"text": "⟦MEETING_NUMBER_A⟧ is the start."', prompt)
         self.assertNotIn('"text": "Miro Keimi', prompt)
 
     def test_retries_invalid_or_missing_segments_then_fails(self):
@@ -110,6 +110,50 @@ class CleanupTests(unittest.TestCase):
             with self.assertRaisesRegex(RuntimeError, "failed validation"):
                 clean_transcript("Miro: We need 3 seats.", model)
 
+    def test_numbers_survive_model_cleanup_and_are_audited_in_plain_text(self):
+        prompts = []
+        def reply(prompt, _limit, **kw):
+            prompts.append(prompt)
+            if issubclass(kw['response_schema'], CleanupAudit):
+                self.assertIn('We need 3 seats by 2026-12-04.', prompt)
+                return valid_reply(prompt, kw['response_schema'])
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1])
+            self.assertNotIn('3', items[0]['text'])
+            self.assertNotIn('2026', items[0]['text'])
+            return json.dumps({'segments': [{'id': items[0]['id'],
+                'text': items[0]['text'].replace(' uh ', ' ')}]})
+        model = Mock()
+        model._ask_text.side_effect = reply
+        result = clean_transcript('Miro: We uh need 3 seats by 2026-12-04.', model)
+        self.assertEqual(result, 'Miro: We need 3 seats by 2026-12-04.')
+        self.assertEqual(len(prompts), 2)
+
+    def test_missing_duplicated_or_reordered_number_placeholders_fail_closed(self):
+        for mutation in ('missing', 'duplicated', 'reordered'):
+            def reply(prompt, _limit, **kw):
+                items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nYour previous', 1)[0])
+                text = items[0]['text']
+                tokens = re.findall(r'⟦MEETING_NUMBER_[A-Z]+⟧', text)
+                self.assertEqual(len(tokens), 2)
+                if mutation == 'missing':
+                    text = text.replace(tokens[0], '')
+                elif mutation == 'duplicated':
+                    text += ' ' + tokens[0]
+                else:
+                    text = text.replace(tokens[0], 'TEMP').replace(tokens[1], tokens[0]).replace('TEMP', tokens[1])
+                return json.dumps({'segments': [{'id': items[0]['id'], 'text': text}]})
+            model = Mock()
+            model._ask_text.side_effect = reply
+            with self.subTest(mutation=mutation), self.assertRaisesRegex(RuntimeError, 'failed validation'):
+                clean_transcript('Miro: We need 3 seats by 2026-12-04.', model)
+
+    def test_number_mask_handles_literal_markers_and_many_values(self):
+        from transcript_cleanup import _mask_numbers, _restore_numbers
+        original = '⟦MEETING_NUMBER_A⟧ ' + ' '.join(str(n) for n in range(30))
+        masked, mapping = _mask_numbers(original)
+        self.assertEqual(_restore_numbers(masked, mapping), original)
+        self.assertNotIn(' 29', masked)
+
     def test_failed_faithfulness_audit_blocks_publication(self):
         def reply(prompt, _limit, **kw):
             if issubclass(kw["response_schema"], CleanupAudit):
@@ -130,6 +174,109 @@ class CleanupTests(unittest.TestCase):
                     "Miro: to set up codecs?")
         with self.assertRaisesRegex(RuntimeError, "failed validation"):
             clean_transcript(original, model)
+
+    def test_removing_a_filler_is_not_mistaken_for_copying_another_turn(self):
+        def reply(prompt, _limit, **kw):
+            if issubclass(kw['response_schema'], CleanupAudit):
+                return valid_reply(prompt, kw['response_schema'])
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1])
+            return json.dumps({'segments': [{'id': item['id'],
+                'text': item['text'].replace(' uh ', ' ')} for item in items]})
+        model = Mock()
+        model._ask_text.side_effect = reply
+        original = 'Speaker 1: We can uh review it tomorrow.\nSpeaker 2: We can review it tomorrow.'
+        self.assertEqual(clean_transcript(original, model),
+                         'Speaker 1: We can review it tomorrow.\nSpeaker 2: We can review it tomorrow.')
+
+    def test_removing_negation_is_still_flagged_as_cross_turn_copying(self):
+        from transcript_cleanup import _cross_segment_copies
+        first = {'id': '1', 'text': 'We can not review it tomorrow.'}
+        second = {'id': '2', 'text': 'We can review it tomorrow.'}
+        self.assertEqual(_cross_segment_copies([first], [second['text']], [first, second]), {'1'})
+
+    def test_common_phrase_requires_two_independent_reviews(self):
+        original = 'Miro: We should check the new issue.\nJuha: Let us check a new plan today.'
+        def run(second_review):
+            model = Mock()
+            def reply(prompt, _limit, **kw):
+                if issubclass(kw['response_schema'], CrossTurnAudit):
+                    if second_review is None:
+                        return '{}'
+                    targets = json.loads(prompt.rsplit('Cross-turn cases: ', 1)[1])
+                    return json.dumps({'segments': [{'id': x['id'],
+                        'faithful': second_review, 'copied': not second_review} for x in targets]})
+                if issubclass(kw['response_schema'], CleanupAudit):
+                    return valid_reply(prompt, kw['response_schema'])
+                items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nReview feedback', 1)[0].split('\nYour previous', 1)[0])
+                return json.dumps({'segments': [{'id': item['id'], 'text':
+                    item['text'].replace('check a new plan', 'check the new plan')} for item in items]})
+            model._ask_text.side_effect = reply
+            return clean_transcript(original, model)
+        self.assertEqual(run(True), original.replace('check a new plan', 'check the new plan'))
+        with self.assertRaisesRegex(RuntimeError, 'failed validation'):
+            run(False)
+        with self.assertRaisesRegex(RuntimeError, 'failed validation'):
+            run(None)
+
+    def test_obvious_cross_turn_insertion_cannot_be_overridden(self):
+        from transcript_cleanup import _reviewable_cross_turns
+        first = {'id': '0', 'speaker': 'Miro', 'text': 'Have you managed to finish this?'}
+        second = {'id': '1', 'speaker': 'Juha', 'text': 'I will ask later.'}
+        self.assertFalse(_reviewable_cross_turns([second], ['Have you managed to ask later.'],
+                                                  [first, second], {'1'}))
+
+    def test_second_cross_turn_review_cannot_override_failed_first_audit(self):
+        model = Mock()
+        cross_calls = []
+        def reply(prompt, _limit, **kw):
+            if issubclass(kw['response_schema'], CrossTurnAudit):
+                cross_calls.append(True)
+                return '{}'
+            if issubclass(kw['response_schema'], CleanupAudit):
+                targets = json.loads(prompt.rsplit('Audit segments: ', 1)[1])
+                return json.dumps({'segments': [{'id': x['id'], 'faithful': x['id'] == '0'} for x in targets]})
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nReview feedback', 1)[0].split('\nYour previous', 1)[0])
+            return json.dumps({'segments': [{'id': x['id'], 'text':
+                x['text'].replace('check a new plan', 'check the new plan')} for x in items]})
+        model._ask_text.side_effect = reply
+        with self.assertRaisesRegex(RuntimeError, 'failed validation'):
+            clean_transcript('Miro: We should check the new issue.\nJuha: Let us check a new plan today.', model)
+        self.assertEqual(cross_calls, [])
+
+    def test_removed_negation_cannot_be_overridden(self):
+        from transcript_cleanup import _reviewable_cross_turns
+        for original, cleaned in (('We can not review it tomorrow.', 'We can review it tomorrow.'),
+                                  ("We can't review it tomorrow.", 'We can review it tomorrow.')):
+            first = {'id': '1', 'speaker': 'Miro', 'text': original}
+            second = {'id': '2', 'speaker': 'Juha', 'text': cleaned}
+            self.assertFalse(_reviewable_cross_turns([first], [cleaned], [first, second], {'1'}))
+
+    def test_context_contamination_retries_isolated_but_still_audits_context(self):
+        prompts = []
+        def reply(prompt, _limit, **kw):
+            prompts.append((issubclass(kw['response_schema'], CleanupAudit), prompt))
+            if issubclass(kw['response_schema'], CleanupAudit):
+                return valid_reply(prompt, kw['response_schema'])
+            items = json.loads(prompt.rsplit('Segments: ', 1)[1].split('\nReview feedback', 1)[0].split('\nYour previous', 1)[0])
+            has_context = bool(re.search(r'Earlier context:\s+Have you managed to finish this\?', prompt))
+            result = []
+            for item in items:
+                text = item['text']
+                if item['id'] == '1' and (len(items) > 1 or has_context):
+                    text = 'Have you managed to ask later.'
+                result.append({'id': item['id'], 'text': text})
+            return json.dumps({'segments': result})
+        model = Mock()
+        model._ask_text.side_effect = reply
+        original = 'Miro: Have you managed to finish this?\nJuha: I will ask later.'
+        self.assertEqual(clean_transcript(original, model), original)
+        self.assertTrue(any(re.search(r'Earlier context:\s+Have you managed to finish this\?', p)
+                            for is_audit, p in prompts if is_audit))
+        self.assertTrue(any('Earlier context: \nLater context: \nSegments:' in p
+                            for is_audit, p in prompts if not is_audit))
+        self.assertTrue(any('This is the final isolated retry' in p and
+                            'Preserve the original wording' in p
+                            for is_audit, p in prompts if not is_audit))
 
     def test_interrupted_sentences_keep_each_speaker_turn(self):
         model = Mock()
@@ -210,6 +357,19 @@ class CleanupTests(unittest.TestCase):
                          re.findall(r"\[Chunk starting [^\]]+\]", original))
         self.assertEqual([int(value) for value in re.findall(r"item (\d+)", result)], list(range(32)))
         self.assertEqual(model._with_uploaded_audio.call_count, 64)
+
+    def test_many_short_turns_fit_provider_schema_and_remain_in_order(self):
+        from google.genai.errors import ClientError
+        def reply(_path, prompt, _limit, **kw):
+            audit = issubclass(kw['response_schema'], CleanupAudit)
+            items = json.loads(prompt.rsplit('Audit segments: ' if audit else 'Segments: ', 1)[1])
+            if len(items) > 50:
+                raise ClientError(400, {'error': {'message': 'invalid argument', 'status': 'INVALID_ARGUMENT'}})
+            return valid_reply(prompt, kw['response_schema'])
+        model = Mock()
+        model._with_uploaded_audio.side_effect = reply
+        original = '\n'.join(f'Speaker 1: We discussed item {i}.' for i in range(97))
+        self.assertEqual(clean_transcript(original, model, audio_chunks=['audio']), original)
 
     def test_verified_company_mentions_are_available_across_audio_chunks(self):
         model = Mock()

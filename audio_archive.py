@@ -24,6 +24,7 @@ from pathlib import Path
 import google.auth
 import requests
 from google.auth import impersonated_credentials
+from meeting_auth import default_credentials
 from google.auth.transport.requests import Request as GoogleAuthRequest
 from google import genai
 from google.genai import types
@@ -87,7 +88,7 @@ def drive_credentials(impersonate_service_account=None):
             target_scopes=["https://www.googleapis.com/auth/drive",
                            "https://www.googleapis.com/auth/documents"],
         )
-    credentials, _ = google.auth.default(
+    credentials, _ = default_credentials(
         scopes=["https://www.googleapis.com/auth/drive",
                 "https://www.googleapis.com/auth/documents"]
     )
@@ -96,7 +97,7 @@ def drive_credentials(impersonate_service_account=None):
 
 def owner_drive_credentials(service_account_email, owner_email, source_credentials=None):
     """Read an organizer's Meet files by ID without depending on Drive sharing."""
-    source = source_credentials or google.auth.default(
+    source = source_credentials or default_credentials(
         scopes=["https://www.googleapis.com/auth/cloud-platform"]
     )[0]
     return impersonated_credentials.Credentials(
@@ -479,6 +480,8 @@ def extract_audio_chunks(recording_url, output_dir):
 
 class AudioGemini:
     def __init__(self, api_key, model="gemini-3.5-flash-lite"):
+        # HTTPX INFO logs contain resumable upload URLs and identifiers.
+        logging.getLogger("httpx").setLevel(logging.WARNING)
         self.client = genai.Client(api_key=api_key)
         self.model = model
 
@@ -608,14 +611,31 @@ class AudioGemini:
         return "\n\n".join(sections)
 
 
+def archive_content_digest(content):
+    """Normalize Docs export line endings and expanded blank paragraphs."""
+    if isinstance(content, bytes):
+        content = content.decode('utf-8-sig')
+    content = content.replace('\r\n', '\n').replace('\r', '\n')
+    content = re.sub(r'\n{2,}', '\n\n', content).strip()
+    return hashlib.sha256(content.encode('utf-8')).hexdigest()
+
+
 def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, method):
-    """Publish only after transcription succeeds; remove an incomplete draft."""
+    """Leave uncertain writes in place so a later worker can verify their digest."""
     from transcript_cleanup import CLEANUP_VERSION
     title = f"{meeting.folder_name} - English Transcript"
+    content = (
+        f"{title}\n\n"
+        f"Source recording: "
+        f"{f'https://drive.google.com/file/d/{meeting.recording_id}/view' if meeting.recording_id else 'not available after three hours'}\n"
+        f"Source notes: {f'https://docs.google.com/document/d/{meeting.notes_id}/edit' if meeting.notes_id else 'not generated'}\n"
+        f"Method: {method}\n\n{transcript}\n"
+    )
     properties = {
         "source_key": meeting.source_key,
         "transcription_method": method,
         "transcript_cleanup_version": CLEANUP_VERSION,
+        "transcript_content_sha256": archive_content_digest(content),
     }
     if meeting.notes_id:
         properties["source_notes_id"] = meeting.notes_id
@@ -628,21 +648,10 @@ def create_archive_doc(drive, docs, destination_folder_id, meeting, transcript, 
         "properties": properties,
     }
     created = drive.files().create(body=body, fields="id,webViewLink", supportsAllDrives=True).execute()
-    content = (
-        f"{title}\n\n"
-        f"Source recording: "
-        f"{f'https://drive.google.com/file/d/{meeting.recording_id}/view' if meeting.recording_id else 'not available after three hours'}\n"
-        f"Source notes: {f'https://docs.google.com/document/d/{meeting.notes_id}/edit' if meeting.notes_id else 'not generated'}\n"
-        f"Method: {method}\n\n{transcript}\n"
-    )
-    try:
-        docs.documents().batchUpdate(
-            documentId=created["id"],
-            body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]},
-        ).execute()
-    except Exception:
-        drive.files().delete(fileId=created["id"], supportsAllDrives=True).execute()
-        raise
+    docs.documents().batchUpdate(
+        documentId=created["id"],
+        body={"requests": [{"insertText": {"location": {"index": 1}, "text": content}}]},
+    ).execute()
     return created["id"]
 
 

@@ -1,6 +1,7 @@
 """Focused tests for matching and waiting on Meet artifacts."""
 
 import unittest
+import logging
 from dataclasses import replace
 from datetime import datetime, timedelta, timezone
 from unittest.mock import Mock, patch
@@ -132,6 +133,31 @@ class MeetingDiscoveryTests(unittest.TestCase):
 
 
 class ProcessingTests(unittest.TestCase):
+    def test_audio_client_suppresses_http_request_urls(self):
+        logger = logging.getLogger('httpx')
+        previous = logger.level
+        self.addCleanup(logger.setLevel, previous)
+        logger.setLevel(logging.INFO)
+        with patch('audio_archive.genai.Client'):
+            AudioGemini('test-key')
+        self.assertGreaterEqual(logger.level, logging.WARNING)
+
+    def test_uncertain_doc_write_preserves_existing_artifact_for_reconciliation(self):
+        from audio_archive import create_archive_doc
+        drive, docs = Mock(), Mock()
+        drive.files.return_value.create.return_value.execute.return_value = {'id': 'created-doc'}
+        docs.documents.return_value.batchUpdate.return_value.execute.side_effect = TimeoutError()
+        with self.assertRaises(TimeoutError):
+            create_archive_doc(drive, docs, 'destination', self.meeting(None), 'Speech.', 'AI-cleaned')
+        drive.files.return_value.delete.assert_not_called()
+
+    def test_google_docs_export_preserves_checksum_despite_expanded_blank_lines(self):
+        from audio_archive import archive_content_digest
+        original = 'Title\n\nMethod: test\n\nSynthetic speech.\n'
+        exported = b'Title\r\n\r\n\r\nMethod: test\r\n\r\n\r\nSynthetic speech.'
+        self.assertEqual(archive_content_digest(original), archive_content_digest(exported))
+        self.assertNotEqual(archive_content_digest(original), archive_content_digest(exported.replace(b'speech', b'claim')))
+
     def setUp(self):
         patcher = patch("transcript_cleanup.clean_transcript",
                         side_effect=lambda text, *_args, **_kwargs: "Cleaned " + text)
@@ -264,6 +290,9 @@ class ProcessingTests(unittest.TestCase):
         self.assertIn("AI-cleaned", content)
         self.assertEqual(company.files.return_value.create.call_args.kwargs["body"]["properties"]
                          ["transcript_cleanup_version"], "1")
+        from audio_archive import archive_content_digest
+        self.assertEqual(company.files.return_value.create.call_args.kwargs["body"]["properties"]
+                         ["transcript_content_sha256"], archive_content_digest(content))
         source.files.return_value.update.assert_not_called()
 
     def test_recording_only_idempotency_does_not_match_unrelated_missing_note(self):
