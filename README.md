@@ -1,5 +1,12 @@
 # MeetingIntern
 
+> **Archived:** This repository is no longer the home for new MeetingIntern
+> development. The code is moving into the
+> [Clarvo monorepo](https://github.com/clarvo-ai/power-apply-clarvo) under
+> `apps/clarvo-intelligence/meetingintern`. That migration is in progress; the
+> directory will be available on the monorepo's `dev` branch after it is merged.
+> This archive remains available for the original history and reference.
+
 ## VM migration (staged)
 
 `vm_runner.py` runs discovery every 15 minutes, premeeting settings every 15
